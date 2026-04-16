@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+
+# Environment
+.env
+.env.local
+
+# IDE
+.vscode/
+.idea/
+
+# Screenshots (from browsing)
+*.png
+
+# Playwright MCP
+.playwright-mcp/
+
+# Claude
+.claude/
+
+# Remember
+.remember/
+
+# OS
+.DS_Store
+Thumbs.db

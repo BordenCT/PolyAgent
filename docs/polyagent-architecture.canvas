@@ -1,0 +1,318 @@
+{
+  "nodes": [
+    {
+      "id": "polymarket-api",
+      "type": "text",
+      "x": -600,
+      "y": -400,
+      "width": 220,
+      "height": 80,
+      "color": "3",
+      "text": "## Polymarket CLOB API\nFree, read-only\n500 markets/scan"
+    },
+    {
+      "id": "polymarket-cli",
+      "type": "text",
+      "x": -600,
+      "y": -280,
+      "width": 220,
+      "height": 80,
+      "color": "3",
+      "text": "## polymarket-cli\nRust CLI subprocess\nOrder books, midpoints"
+    },
+    {
+      "id": "claude-api",
+      "type": "text",
+      "x": -600,
+      "y": -100,
+      "width": 220,
+      "height": 80,
+      "color": "5",
+      "text": "## Claude Sonnet 4\nAnthropic API\n~$0.02/market eval"
+    },
+    {
+      "id": "voyage-api",
+      "type": "text",
+      "x": -600,
+      "y": 20,
+      "width": 220,
+      "height": 80,
+      "color": "5",
+      "text": "## Voyage AI\nvoyage-3.5-lite\nFree tier (200M tok/mo)"
+    },
+    {
+      "id": "scanner",
+      "type": "text",
+      "x": -200,
+      "y": -400,
+      "width": 260,
+      "height": 120,
+      "color": "1",
+      "text": "## Scanner Workers\n`max(1, cores // 3)`\n\n- Pull 500 markets\n- Score: gap, depth, hours\n- Kill 93% -> queue survivors"
+    },
+    {
+      "id": "scan-queue",
+      "type": "text",
+      "x": 120,
+      "y": -380,
+      "width": 160,
+      "height": 60,
+      "color": "6",
+      "text": "### scan_queue\n`queue.Queue`"
+    },
+    {
+      "id": "brain",
+      "type": "text",
+      "x": 340,
+      "y": -400,
+      "width": 260,
+      "height": 140,
+      "color": "1",
+      "text": "## Brain Workers\n`max(1, cores // 6)`\n\n4 checks via Claude:\n1. Base rate (RAG)\n2. News (6h)\n3. Whale check\n4. Disposition bias\n\n3/4 agree + >75% conf"
+    },
+    {
+      "id": "thesis-queue",
+      "type": "text",
+      "x": 660,
+      "y": -380,
+      "width": 160,
+      "height": 60,
+      "color": "6",
+      "text": "### thesis_queue\n`queue.Queue`"
+    },
+    {
+      "id": "executor",
+      "type": "text",
+      "x": 880,
+      "y": -400,
+      "width": 260,
+      "height": 140,
+      "color": "1",
+      "text": "## Executor Workers\n`max(1, cores // 24)`\n\nConsensus voting:\n- 2/3 agents = full Kelly\n- 1/3 = half Kelly\n- 0/3 = skip\n\nPaper or live execution"
+    },
+    {
+      "id": "exit-monitor",
+      "type": "text",
+      "x": 880,
+      "y": -180,
+      "width": 260,
+      "height": 120,
+      "color": "1",
+      "text": "## Exit Monitor Workers\n`max(1, cores // 6)`\n\n3 triggers:\n1. Target hit (85%)\n2. Volume spike (3x)\n3. Time decay (24h)"
+    },
+    {
+      "id": "strategies",
+      "type": "text",
+      "x": 880,
+      "y": 0,
+      "width": 260,
+      "height": 100,
+      "color": "4",
+      "text": "## Strategy Agents\n- **Arbitrage**: price gaps\n- **Convergence**: price -> estimate\n- **Whale Copy**: mirror targets"
+    },
+    {
+      "id": "postgres",
+      "type": "text",
+      "x": 200,
+      "y": -100,
+      "width": 300,
+      "height": 180,
+      "color": "2",
+      "text": "## PostgreSQL 17 + pgvector\n\n**Tables:**\n- markets (+ embedding)\n- target_wallets (+ embedding)\n- thesis (+ embedding)\n- positions\n- trade_log\n- historical_outcomes (+ embedding)\n\n**HNSW indexes** on all embeddings"
+    },
+    {
+      "id": "worker-pool",
+      "type": "text",
+      "x": -200,
+      "y": -180,
+      "width": 260,
+      "height": 80,
+      "color": "6",
+      "text": "## WorkerPool\nAuto-scales to `os.cpu_count()`\nEnv var overrides\nTarget: 96-thread AMD"
+    },
+    {
+      "id": "cli",
+      "type": "text",
+      "x": 200,
+      "y": 140,
+      "width": 300,
+      "height": 140,
+      "color": "4",
+      "text": "## CLI (Click)\n```\npolyagent status [--watch]\npolyagent perf [--daily|--by-strategy]\npolyagent positions [--closed|--worst]\npolyagent markets [--rejected]\npolyagent thesis <MARKET_ID>\n```"
+    },
+    {
+      "id": "container-app",
+      "type": "text",
+      "x": -200,
+      "y": 140,
+      "width": 220,
+      "height": 80,
+      "color": "0",
+      "text": "### polyagent-app\nPython 3.14t + Rust CLI\nContainerfile + compose.yaml"
+    },
+    {
+      "id": "container-db",
+      "type": "text",
+      "x": -200,
+      "y": 260,
+      "width": 220,
+      "height": 60,
+      "color": "0",
+      "text": "### polyagent-db\nPostgreSQL 17 + pgvector"
+    },
+    {
+      "id": "kelly",
+      "type": "text",
+      "x": 660,
+      "y": -260,
+      "width": 160,
+      "height": 80,
+      "color": "4",
+      "text": "### Kelly Criterion\nf* = (p*b - q) / b\nCapped at 0.25\nSweet spot: 0.05-0.15"
+    }
+  ],
+  "edges": [
+    {
+      "id": "e1",
+      "fromNode": "polymarket-api",
+      "toNode": "scanner",
+      "fromSide": "right",
+      "toSide": "left",
+      "label": "market data"
+    },
+    {
+      "id": "e2",
+      "fromNode": "polymarket-cli",
+      "toNode": "scanner",
+      "fromSide": "right",
+      "toSide": "left",
+      "label": "order books"
+    },
+    {
+      "id": "e3",
+      "fromNode": "scanner",
+      "toNode": "scan-queue",
+      "fromSide": "right",
+      "toSide": "left",
+      "label": "survivors"
+    },
+    {
+      "id": "e4",
+      "fromNode": "scan-queue",
+      "toNode": "brain",
+      "fromSide": "right",
+      "toSide": "left"
+    },
+    {
+      "id": "e5",
+      "fromNode": "claude-api",
+      "toNode": "brain",
+      "fromSide": "right",
+      "toSide": "bottom",
+      "label": "evaluations"
+    },
+    {
+      "id": "e6",
+      "fromNode": "voyage-api",
+      "toNode": "postgres",
+      "fromSide": "right",
+      "toSide": "left",
+      "label": "embeddings"
+    },
+    {
+      "id": "e7",
+      "fromNode": "brain",
+      "toNode": "thesis-queue",
+      "fromSide": "right",
+      "toSide": "left",
+      "label": "theses"
+    },
+    {
+      "id": "e8",
+      "fromNode": "thesis-queue",
+      "toNode": "executor",
+      "fromSide": "right",
+      "toSide": "left"
+    },
+    {
+      "id": "e9",
+      "fromNode": "executor",
+      "toNode": "exit-monitor",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "label": "open positions"
+    },
+    {
+      "id": "e10",
+      "fromNode": "strategies",
+      "toNode": "executor",
+      "fromSide": "top",
+      "toSide": "bottom",
+      "label": "votes"
+    },
+    {
+      "id": "e11",
+      "fromNode": "scanner",
+      "toNode": "postgres",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "label": "persist markets"
+    },
+    {
+      "id": "e12",
+      "fromNode": "brain",
+      "toNode": "postgres",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "label": "persist theses"
+    },
+    {
+      "id": "e13",
+      "fromNode": "executor",
+      "toNode": "postgres",
+      "fromSide": "bottom",
+      "toSide": "right",
+      "label": "persist positions"
+    },
+    {
+      "id": "e14",
+      "fromNode": "exit-monitor",
+      "toNode": "postgres",
+      "fromSide": "left",
+      "toSide": "right",
+      "label": "update positions"
+    },
+    {
+      "id": "e15",
+      "fromNode": "cli",
+      "toNode": "postgres",
+      "fromSide": "top",
+      "toSide": "bottom",
+      "label": "query"
+    },
+    {
+      "id": "e16",
+      "fromNode": "worker-pool",
+      "toNode": "scanner",
+      "fromSide": "top",
+      "toSide": "bottom",
+      "label": "manages"
+    },
+    {
+      "id": "e17",
+      "fromNode": "kelly",
+      "toNode": "executor",
+      "fromSide": "right",
+      "toSide": "left",
+      "label": "sizing"
+    },
+    {
+      "id": "e18",
+      "fromNode": "postgres",
+      "toNode": "brain",
+      "fromSide": "top",
+      "toSide": "bottom",
+      "label": "RAG context"
+    }
+  ]
+}
