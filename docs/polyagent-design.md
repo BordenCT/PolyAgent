@@ -219,7 +219,8 @@ polyagent/
 │   ├── queues.py               # Inter-thread queue definitions
 │   └── logging.py              # Structured JSON logging
 ├── scripts/
-│   ├── analyze_wallets.py      # One-time: poly_data -> target_wallets
+│   ├── ingest.py               # Data ingestion: snapshot download + trade processing
+│   ├── analyze_wallets.py      # One-time: ingested data -> target_wallets
 │   └── backfill_embeddings.py  # One-time: embed historical outcomes
 ├── main.py                     # Entry point
 ├── Containerfile
@@ -456,7 +457,7 @@ Voyage AI free tier covers 200M tokens/month. Our usage (~810K/month) is < 0.5% 
 |--------|-----------|-------------------|---------|
 | Market scan (500 markets) | ~1 MB | ~0.25 MB | ~6 MB |
 | Order books (35 survivors) | ~175 KB | ~44 KB | ~1 MB |
-| Historical poly_data | One-time: ~2-5 GB | — | — |
+| Historical data (`polyagent ingest`) | One-time: ~2-5 GB | — | — |
 | **DB growth** | ~2 MB | ~0.5 MB | ~12 MB |
 
 Monthly DB growth: ~360 MB (positions, theses, logs, embeddings).
@@ -555,7 +556,7 @@ Switching to live: set `PAPER_TRADE=false`, provide Polymarket wallet credential
 
 ## Backtest Engine
 
-Replays the full pipeline against historical poly_data to validate strategy performance before risking real capital.
+Replays the full pipeline against historical Polymarket data to validate strategy performance before risking real capital. Data is fetched via `polyagent ingest --snapshot` (no external repo dependency).
 
 ### Architecture
 
@@ -566,14 +567,14 @@ polyagent/
 ├── backtest/
 │   ├── __init__.py
 │   ├── engine.py           # BacktestEngine — drives the time-step loop
-│   ├── data_loader.py      # Loads poly_data CSVs into MarketData snapshots
+│   ├── data_loader.py      # Loads ingested CSVs into MarketData snapshots
 │   ├── estimator.py        # Pluggable probability estimators (historical, Claude, random)
 │   └── report.py           # Performance metrics and summary output
 ```
 
 ### How It Works
 
-1. **Load historical data** — `data_loader.py` reads poly_data CSVs (trades, markets, prices) and builds time-ordered snapshots. Each snapshot represents the market state at a point in time.
+1. **Load historical data** — `data_loader.py` reads ingested CSVs from `polyagent ingest` (trades, markets, prices) and builds time-ordered snapshots. Each snapshot represents the market state at a point in time.
 
 2. **Replay loop** — The engine iterates through time steps (configurable granularity: hourly, 4-hourly, daily). At each step:
    - Scanner scores all active markets against the estimator's probability

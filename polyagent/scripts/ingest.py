@@ -9,13 +9,12 @@ from __future__ import annotations
 
 import csv
 import json
+import lzma
 import logging
 import os
-import subprocess
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Generator
 
 import httpx
 import polars as pl
@@ -151,8 +150,11 @@ class DataIngester:
     # ── Stage 2a: Snapshot download ─────────────────────────────────────
 
     def download_snapshot(self) -> bool:
-        """Download pre-built orderFilled snapshot. Returns True on success."""
-        xz_path = self.data_dir / "goldsky" / "orderFilled_complete.csv.xz"
+        """Download pre-built orderFilled snapshot. Pure Python, no system deps.
+
+        Uses httpx for streaming download and stdlib lzma for decompression.
+        Returns True on success.
+        """
         target = self.orders_csv
 
         if target.exists():
@@ -161,24 +163,33 @@ class DataIngester:
 
         logger.info("Downloading snapshot from S3 (~2GB)...")
         try:
-            result = subprocess.run(
-                ["curl", "-L", "-o", str(xz_path), SNAPSHOT_URL],
-                check=True,
-                capture_output=True,
-                text=True,
-            )
-            logger.info("Download complete. Decompressing...")
-            subprocess.run(["xz", "-d", str(xz_path)], check=True)
+            with httpx.stream("GET", SNAPSHOT_URL, follow_redirects=True, timeout=600.0) as resp:
+                resp.raise_for_status()
+                total = int(resp.headers.get("content-length", 0))
+                downloaded = 0
 
-            # Rename to expected filename
-            decompressed = xz_path.with_suffix("")  # removes .xz
-            if decompressed != target:
-                decompressed.rename(target)
+                # Stream download → decompress xz → write CSV in one pass
+                decompressor = lzma.LZMADecompressor()
+                with open(target, "wb") as f:
+                    for chunk in resp.iter_bytes(chunk_size=1024 * 256):
+                        downloaded += len(chunk)
+                        try:
+                            f.write(decompressor.decompress(chunk))
+                        except lzma.LZMAError:
+                            # Final chunk may have trailing data
+                            break
+
+                        if total > 0 and downloaded % (50 * 1024 * 1024) < (256 * 1024):
+                            pct = downloaded / total * 100
+                            logger.info("Download: %.0f%% (%d MB / %d MB)", pct, downloaded // (1024 * 1024), total // (1024 * 1024))
 
             logger.info("Snapshot ready: %s", target)
             return True
-        except (subprocess.CalledProcessError, FileNotFoundError) as e:
+        except (httpx.HTTPError, lzma.LZMAError, OSError) as e:
             logger.error("Snapshot download failed: %s", e)
+            # Clean up partial file
+            if target.exists():
+                target.unlink()
             return False
 
     # ── Stage 2b: Goldsky scrape (slow) ─────────────────────────────────
@@ -187,10 +198,10 @@ class DataIngester:
         """Scrape order-filled events from Goldsky subgraph. Resumable."""
         last_timestamp = 0
         if self.orders_csv.exists():
-            result = subprocess.run(["tail", "-n", "1", str(self.orders_csv)], capture_output=True, text=True)
-            if result.stdout.strip():
+            last_line = self._read_last_line(self.orders_csv)
+            if last_line:
                 try:
-                    last_timestamp = int(result.stdout.strip().split(",")[0]) - 1
+                    last_timestamp = int(last_line.split(",")[0]) - 1
                     logger.info("Resuming Goldsky from timestamp %d", last_timestamp)
                 except (ValueError, IndexError):
                     pass
@@ -330,7 +341,25 @@ class DataIngester:
         logger.info("Processed %d trades -> %s", len(trades), self.trades_csv)
         return len(trades)
 
-    # ── Cleanup ─────────────────────────────────────────────────────────
+    # ── Helpers ──────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _read_last_line(path: Path) -> str:
+        """Read the last line of a file without loading it all into memory."""
+        with open(path, "rb") as f:
+            f.seek(0, 2)  # seek to end
+            pos = f.tell()
+            if pos == 0:
+                return ""
+            # Walk backwards to find the last newline
+            while pos > 0:
+                pos -= 1
+                f.seek(pos)
+                if f.read(1) == b"\n" and pos < f.seek(0, 2) - 1:
+                    break
+            f.seek(pos + 1 if pos > 0 else 0)
+            return f.readline().decode().strip()
 
     def close(self) -> None:
+        """Close the HTTP client."""
         self._http.close()

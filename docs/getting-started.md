@@ -56,10 +56,15 @@ Validate the strategy against historical data before risking anything.
 ### 2a. Get Historical Data
 
 ```bash
-# Clone poly_data (86M trades, ~2-5 GB)
-cd ~
-git clone https://github.com/warproxxx/poly_data.git
-cd ~/Development/PolyAgent
+# Download and process historical data (pure Python, no system deps needed)
+# Downloads pre-built snapshot (~2GB), fetches market metadata, processes trades
+polyagent ingest --snapshot
+
+# Or specify a custom data directory
+polyagent ingest --snapshot --data-dir ~/polyagent-data
+
+# Alternative: full scrape from Goldsky subgraph (2+ days, but most complete)
+# polyagent ingest --full
 ```
 
 ### 2b. Run Backtests
@@ -70,28 +75,28 @@ polyagent backtest \
   --start 2025-01-01 \
   --end 2026-04-01 \
   --estimator midpoint \
-  --data-dir ~/poly_data
+  --data-dir ./data
 
 # Theoretical ceiling — historical estimator uses perfect foresight
 polyagent backtest \
   --start 2025-01-01 \
   --end 2026-04-01 \
   --estimator historical \
-  --data-dir ~/poly_data
+  --data-dir ./data
 
 # Realistic test — Ollama phi4:14b estimates (free, uses actual LLM reasoning)
 polyagent backtest \
   --start 2025-01-01 \
   --end 2026-04-01 \
   --estimator ollama \
-  --data-dir ~/poly_data
+  --data-dir ./data
 
 # Compare all estimators side by side
 polyagent backtest \
   --start 2025-01-01 \
   --end 2026-04-01 \
   --compare \
-  --data-dir ~/poly_data
+  --data-dir ./data
 
 # Tune parameters — try different bankrolls and Kelly fractions
 polyagent backtest \
@@ -100,7 +105,7 @@ polyagent backtest \
   --estimator historical \
   --bankroll 2000 \
   --kelly-max 0.15 \
-  --data-dir ~/poly_data
+  --data-dir ./data
 ```
 
 ### 2c. Interpret Results
@@ -332,6 +337,18 @@ curl -s http://192.168.1.56:11434/api/tags
 # If unreachable, the bot falls back to midpoint estimates automatically
 # Check LXC is running and port 11434 is open
 # To disable Ollama: set OLLAMA_ENABLED=false in .env
+```
+
+**Data ingestion fails:**
+```bash
+# Check what exists
+ls -la data/goldsky/ data/processed/
+
+# Re-process without re-downloading
+polyagent ingest --process --data-dir ./data
+
+# If snapshot download times out, increase httpx timeout or use --full
+polyagent ingest --full --data-dir ./data
 ```
 
 **No markets passing scanner:**
