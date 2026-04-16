@@ -6,6 +6,12 @@ import pytest
 from polyagent.infra.config import Settings
 
 
+@pytest.fixture(autouse=True)
+def _no_dotenv(monkeypatch):
+    """Prevent .env files from leaking into unit tests."""
+    monkeypatch.setattr("polyagent.infra.config.load_dotenv", lambda *a, **kw: None)
+
+
 def pytest_collection_modifyitems(config, items):
     """Auto-skip integration tests unless --run-integration is passed."""
     if not config.getoption("--run-integration", default=False):

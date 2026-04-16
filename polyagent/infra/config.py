@@ -2,6 +2,9 @@
 from __future__ import annotations
 import os
 from dataclasses import dataclass
+from pathlib import Path
+
+from dotenv import load_dotenv
 
 
 def _env_str(key: str, default: str | None = None) -> str:
@@ -62,10 +65,16 @@ class Settings:
 
     @staticmethod
     def from_env() -> Settings:
-        """Load settings from environment variables.
+        """Load settings from .env file and environment variables.
 
+        .env is loaded with override=False so real env vars take precedence.
         Raises ValueError if ANTHROPIC_API_KEY is not set.
         """
+        # Walk up from cwd to find .env
+        env_path = Path.cwd() / ".env"
+        if env_path.exists():
+            load_dotenv(env_path, override=False)
+
         return Settings(
             paper_trade=_env_bool("PAPER_TRADE", True),
             scan_interval_hours=_env_int("SCAN_INTERVAL_HOURS", 4),
