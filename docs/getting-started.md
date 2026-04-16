@@ -6,6 +6,7 @@
 - Python 3.14 (installed via uv)
 - Git
 - Anthropic API key
+- Ollama LXC at `192.168.1.56` with phi4:14b (scanner estimates)
 - (Optional) Voyage AI API key for embeddings
 
 ---
@@ -27,7 +28,12 @@ cp .env.example .env
 # Edit .env — set your API keys
 # REQUIRED: ANTHROPIC_API_KEY=sk-ant-your-key-here
 # OPTIONAL: VOYAGE_API_KEY=your-voyage-key
-nano .env
+# Ollama is pre-configured to 192.168.1.56 (phi4:14b)
+vim .env
+
+# Verify Ollama is reachable
+curl -s http://192.168.1.56:11434/api/tags | python -m json.tool | head -5
+# Should show phi4:14b in the model list
 
 # Start the database
 podman-compose up -d polyagent-db
@@ -71,6 +77,13 @@ polyagent backtest \
   --start 2025-01-01 \
   --end 2026-04-01 \
   --estimator historical \
+  --data-dir ~/poly_data
+
+# Realistic test — Ollama phi4:14b estimates (free, uses actual LLM reasoning)
+polyagent backtest \
+  --start 2025-01-01 \
+  --end 2026-04-01 \
+  --estimator ollama \
   --data-dir ~/poly_data
 
 # Compare all estimators side by side
@@ -277,14 +290,16 @@ polymarket sell --token-id TOKEN_ID --amount SIZE
 
 ## Cost Reference
 
-| Scan Frequency | Claude API/Month | Best For |
-|---------------|-----------------|----------|
-| Every hour | ~$40-60* | Active markets, maximum opportunity capture |
-| Every 4 hours | ~$25-40* | Balanced — recommended starting point |
-| Every 6 hours | ~$15-25* | Conservative, lower cost |
-| Daily | ~$5-10* | Minimal cost, only catches slow-moving markets |
+Scanner estimates run on local Ollama (phi4:14b) at $0. Only the brain's Claude evaluations cost money.
 
-*With Haiku for scanner + thesis dedup optimization. Without optimization, multiply by ~3x.
+| Scan Frequency | Scanner (Ollama) | Brain (Claude)/Month | Best For |
+|---------------|-----------------|---------------------|----------|
+| Every hour | $0 | ~$403 | Active markets, maximum opportunity capture |
+| Every 4 hours | $0 | ~$101 | Balanced — recommended starting point |
+| Every 6 hours | $0 | ~$67 | Conservative, lower cost |
+| Daily | $0 | ~$17 | Minimal cost, only catches slow-moving markets |
+
+Backtest costs: `historical`/`midpoint`/`ollama` estimators are free. `cached-claude` costs ~$2-5 one-time.
 
 ---
 
@@ -308,6 +323,15 @@ uv pip install -e ".[dev]"
 podman ps --filter name=polyagent-db
 # Check if .env has all required vars
 grep ANTHROPIC_API_KEY .env
+```
+
+**Ollama unreachable:**
+```bash
+# Verify connectivity
+curl -s http://192.168.1.56:11434/api/tags
+# If unreachable, the bot falls back to midpoint estimates automatically
+# Check LXC is running and port 11434 is open
+# To disable Ollama: set OLLAMA_ENABLED=false in .env
 ```
 
 **No markets passing scanner:**

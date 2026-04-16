@@ -21,14 +21,24 @@
       "text": "## polymarket-cli\nRust CLI subprocess\nOrder books, midpoints"
     },
     {
+      "id": "ollama",
+      "type": "text",
+      "x": -600,
+      "y": -160,
+      "width": 220,
+      "height": 80,
+      "color": "1",
+      "text": "## Ollama phi4:14b\n192.168.1.56:11434\nScanner estimates ($0)"
+    },
+    {
       "id": "claude-api",
       "type": "text",
       "x": -600,
-      "y": -100,
+      "y": -60,
       "width": 220,
       "height": 80,
       "color": "5",
-      "text": "## Claude Sonnet 4\nAnthropic API\n~$0.02/market eval"
+      "text": "## Claude Sonnet 4\nAnthropic API\nBrain only (~$0.02/eval)"
     },
     {
       "id": "voyage-api",
@@ -187,6 +197,14 @@
       "fromSide": "right",
       "toSide": "left",
       "label": "order books"
+    },
+    {
+      "id": "e_ollama",
+      "fromNode": "ollama",
+      "toNode": "scanner",
+      "fromSide": "right",
+      "toSide": "left",
+      "label": "probability estimates"
     },
     {
       "id": "e3",
