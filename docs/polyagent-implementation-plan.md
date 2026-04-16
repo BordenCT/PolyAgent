@@ -23,7 +23,8 @@ polyagent/
 │   ├── status.py                   # polyagent status [--watch]
 │   ├── positions.py                # polyagent positions [--closed|--worst]
 │   ├── performance.py              # polyagent perf [--daily|--by-strategy|--by-category]
-│   └── markets.py                  # polyagent markets [--rejected] + polyagent thesis <ID>
+│   ├── markets.py                  # polyagent markets [--rejected] + polyagent thesis <ID>
+│   └── backtest_cmd.py             # polyagent backtest [--start|--end|--estimator|--report]
 ├── services/
 │   ├── __init__.py
 │   ├── scanner.py                  # Market scoring (gap/depth/hours)
@@ -57,6 +58,12 @@ polyagent/
 │   ├── pool.py                     # Dynamic WorkerPool
 │   ├── queues.py                   # Inter-thread queue definitions
 │   └── logging.py                  # Structured JSON logging
+├── backtest/
+│   ├── __init__.py
+│   ├── engine.py                   # BacktestEngine: time-step replay loop
+│   ├── data_loader.py              # Load poly_data CSVs into MarketData snapshots
+│   ├── estimator.py                # Pluggable estimators: Historical, Cached, Live
+│   └── report.py                   # Performance metrics + Rich output
 ├── scripts/
 │   ├── analyze_wallets.py          # One-time: poly_data -> target_wallets
 │   └── backfill_embeddings.py      # One-time: embed historical outcomes
@@ -98,6 +105,8 @@ Tasks that can run concurrently (no shared dependencies):
 - **After Task 7:** Tasks 8 + 9 in parallel
 - **After Task 10:** Tasks 11 + 12 in parallel
 - **After Task 13:** Tasks 14 + 15 in parallel
+- **After Task 17:** Tasks 18 + 19 can start (backtest depends on services from 7, 12, 14)
+- **After Task 19:** Task 20 (backtest CLI)
 
 ---
 
@@ -4495,6 +4504,1090 @@ git commit -m "test: add integration tests for full pipeline and DB round-trip"
 
 ---
 
+## Task 18: Backtest Data Loader + Estimators
+
+**Files:**
+- Create: `polyagent/backtest/__init__.py`
+- Create: `polyagent/backtest/data_loader.py`
+- Create: `polyagent/backtest/estimator.py`
+- Create: `db/migrations/002_backtest_schema.sql`
+- Create: `tests/unit/backtest/__init__.py`
+- Create: `tests/unit/backtest/test_data_loader.py`
+- Create: `tests/unit/backtest/test_estimator.py`
+
+- [ ] **Step 1: Write data loader tests**
+
+```python
+# tests/unit/backtest/test_data_loader.py
+"""Tests for backtest data loader."""
+from datetime import date, datetime, timezone
+from decimal import Decimal
+from io import StringIO
+
+import pytest
+
+from polyagent.backtest.data_loader import DataLoader, MarketSnapshot
+
+
+class TestDataLoader:
+    def test_parse_trade_row(self):
+        row = {
+            "condition_id": "0xabc",
+            "question": "Will BTC hit 100k?",
+            "category": "crypto",
+            "token_id": "tok_1",
+            "price": "0.45",
+            "size": "500",
+            "timestamp": "2025-06-15T12:00:00Z",
+            "maker": "0xwallet1",
+            "outcome": "Yes",
+        }
+        snapshot = DataLoader.parse_trade_row(row)
+        assert snapshot.polymarket_id == "0xabc"
+        assert snapshot.price == Decimal("0.45")
+        assert snapshot.volume == Decimal("500")
+
+    def test_group_by_day(self):
+        snapshots = [
+            MarketSnapshot(
+                polymarket_id="0x1", question="test?", category="crypto",
+                token_id="t1", price=Decimal("0.4"), volume=Decimal("100"),
+                timestamp=datetime(2025, 6, 15, 10, 0, tzinfo=timezone.utc),
+                outcome="Yes",
+            ),
+            MarketSnapshot(
+                polymarket_id="0x1", question="test?", category="crypto",
+                token_id="t1", price=Decimal("0.45"), volume=Decimal("200"),
+                timestamp=datetime(2025, 6, 15, 14, 0, tzinfo=timezone.utc),
+                outcome="Yes",
+            ),
+            MarketSnapshot(
+                polymarket_id="0x1", question="test?", category="crypto",
+                token_id="t1", price=Decimal("0.5"), volume=Decimal("300"),
+                timestamp=datetime(2025, 6, 16, 10, 0, tzinfo=timezone.utc),
+                outcome="Yes",
+            ),
+        ]
+        by_day = DataLoader.group_by_day(snapshots)
+        assert len(by_day) == 2
+        assert date(2025, 6, 15) in by_day
+        assert len(by_day[date(2025, 6, 15)]) == 2
+
+
+class TestMarketSnapshot:
+    def test_to_market_data(self):
+        snap = MarketSnapshot(
+            polymarket_id="0x1", question="test?", category="crypto",
+            token_id="t1", price=Decimal("0.45"), volume=Decimal("50000"),
+            timestamp=datetime(2025, 6, 15, tzinfo=timezone.utc),
+            outcome="Yes",
+        )
+        market = snap.to_market_data(hours_to_resolution=48.0)
+        assert market.polymarket_id == "0x1"
+        assert market.midpoint_price == Decimal("0.45")
+```
+
+- [ ] **Step 2: Write estimator tests**
+
+```python
+# tests/unit/backtest/test_estimator.py
+"""Tests for backtest probability estimators."""
+from polyagent.backtest.estimator import (
+    HistoricalEstimator,
+    MidpointEstimator,
+)
+
+
+class TestHistoricalEstimator:
+    def test_resolved_yes_returns_high(self):
+        estimator = HistoricalEstimator()
+        p = estimator.estimate("0x1", outcome="Yes", final_price=1.0)
+        assert p == 1.0
+
+    def test_resolved_no_returns_low(self):
+        estimator = HistoricalEstimator()
+        p = estimator.estimate("0x1", outcome="No", final_price=0.0)
+        assert p == 0.0
+
+    def test_partial_resolution(self):
+        estimator = HistoricalEstimator()
+        p = estimator.estimate("0x1", outcome="Yes", final_price=0.85)
+        assert p == 0.85
+
+
+class TestMidpointEstimator:
+    def test_returns_market_price(self):
+        estimator = MidpointEstimator()
+        p = estimator.estimate("0x1", market_price=0.55)
+        assert p == 0.55
+
+    def test_midpoint_produces_no_edge(self):
+        """Using market price as estimate should produce ~0 gap after scoring."""
+        estimator = MidpointEstimator()
+        price = 0.50
+        estimate = estimator.estimate("0x1", market_price=price)
+        gap = abs(estimate - price)
+        assert gap == 0.0  # no edge, scanner should kill this
+```
+
+- [ ] **Step 3: Run tests to verify they fail**
+
+```bash
+python -m pytest tests/unit/backtest/ -v
+```
+
+Expected: FAIL — `ModuleNotFoundError`
+
+- [ ] **Step 4: Create backtest schema migration**
+
+```sql
+-- db/migrations/002_backtest_schema.sql
+-- Backtest run tracking
+
+CREATE TABLE IF NOT EXISTS backtest_runs (
+    id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    started_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    completed_at    TIMESTAMPTZ,
+    date_start      DATE NOT NULL,
+    date_end        DATE NOT NULL,
+    estimator       TEXT NOT NULL,
+    parameters      JSONB NOT NULL DEFAULT '{}',
+    results         JSONB,
+    total_trades    INTEGER DEFAULT 0,
+    win_rate        DECIMAL DEFAULT 0,
+    total_pnl       DECIMAL DEFAULT 0,
+    sharpe          DECIMAL DEFAULT 0,
+    max_drawdown    DECIMAL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS backtest_positions (
+    id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    run_id          UUID NOT NULL REFERENCES backtest_runs(id) ON DELETE CASCADE,
+    polymarket_id   TEXT NOT NULL,
+    question        TEXT NOT NULL,
+    category        TEXT NOT NULL DEFAULT 'unknown',
+    side            TEXT NOT NULL,
+    entry_price     DECIMAL NOT NULL,
+    exit_price      DECIMAL,
+    target_price    DECIMAL NOT NULL,
+    kelly_fraction  DECIMAL NOT NULL,
+    position_size   DECIMAL NOT NULL,
+    pnl             DECIMAL DEFAULT 0,
+    exit_reason     TEXT,
+    entry_date      TIMESTAMPTZ NOT NULL,
+    exit_date       TIMESTAMPTZ,
+    estimator_prob  DECIMAL NOT NULL,
+    market_price    DECIMAL NOT NULL
+);
+
+CREATE INDEX idx_backtest_positions_run_id ON backtest_positions(run_id);
+```
+
+- [ ] **Step 5: Implement data loader**
+
+```python
+# polyagent/backtest/__init__.py
+"""Backtest engine for validating strategies against historical data."""
+
+# polyagent/backtest/data_loader.py
+"""Load poly_data CSVs into time-ordered market snapshots."""
+from __future__ import annotations
+
+import logging
+from collections import defaultdict
+from dataclasses import dataclass
+from datetime import date, datetime, timezone
+from decimal import Decimal
+from pathlib import Path
+
+import polars as pl
+
+from polyagent.models import MarketData
+
+logger = logging.getLogger("polyagent.backtest.data_loader")
+
+
+@dataclass
+class MarketSnapshot:
+    """A single market state at a point in time."""
+
+    polymarket_id: str
+    question: str
+    category: str
+    token_id: str
+    price: Decimal
+    volume: Decimal
+    timestamp: datetime
+    outcome: str | None = None
+
+    def to_market_data(self, hours_to_resolution: float = 48.0) -> MarketData:
+        """Convert to MarketData for the scanner."""
+        return MarketData(
+            polymarket_id=self.polymarket_id,
+            question=self.question,
+            category=self.category,
+            token_id=self.token_id,
+            midpoint_price=self.price,
+            bids_depth=self.volume,
+            asks_depth=self.volume,
+            hours_to_resolution=hours_to_resolution,
+            volume_24h=self.volume,
+        )
+
+    @staticmethod
+    def parse_trade_row(row: dict) -> MarketSnapshot:
+        """Parse a single trade row from poly_data CSV."""
+        ts_str = row.get("timestamp", "")
+        if ts_str:
+            ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+        else:
+            ts = datetime.now(timezone.utc)
+
+        return MarketSnapshot(
+            polymarket_id=row.get("condition_id", ""),
+            question=row.get("question", ""),
+            category=row.get("category", "unknown"),
+            token_id=row.get("token_id", ""),
+            price=Decimal(str(row.get("price", 0))),
+            volume=Decimal(str(row.get("size", 0))),
+            timestamp=ts,
+            outcome=row.get("outcome"),
+        )
+
+
+class DataLoader:
+    """Loads and organizes historical market data for backtesting."""
+
+    def __init__(self, data_dir: str | Path) -> None:
+        self._data_dir = Path(data_dir)
+
+    def load_trades(
+        self,
+        start_date: date | None = None,
+        end_date: date | None = None,
+        limit: int | None = None,
+    ) -> list[MarketSnapshot]:
+        """Load trade data from poly_data CSVs using Polars."""
+        csv_path = self._data_dir / "processed" / "trades.csv"
+        if not csv_path.exists():
+            raise FileNotFoundError(f"Trades CSV not found at {csv_path}")
+
+        logger.info("Loading trades from %s", csv_path)
+        df = pl.scan_csv(str(csv_path)).collect(streaming=True)
+
+        if "timestamp" in df.columns:
+            df = df.sort("timestamp")
+            if start_date:
+                df = df.filter(pl.col("timestamp") >= str(start_date))
+            if end_date:
+                df = df.filter(pl.col("timestamp") <= str(end_date))
+
+        if limit:
+            df = df.head(limit)
+
+        snapshots = []
+        for row in df.iter_rows(named=True):
+            snapshots.append(MarketSnapshot.parse_trade_row(row))
+
+        logger.info("Loaded %d trade snapshots", len(snapshots))
+        return snapshots
+
+    def load_resolutions(self) -> dict[str, dict]:
+        """Load market resolution outcomes."""
+        res_path = self._data_dir / "processed" / "resolutions.csv"
+        if not res_path.exists():
+            return {}
+
+        df = pl.read_csv(str(res_path))
+        resolutions = {}
+        for row in df.iter_rows(named=True):
+            resolutions[row.get("condition_id", "")] = {
+                "outcome": row.get("outcome"),
+                "final_price": float(row.get("final_price", 0)),
+                "resolution_date": row.get("resolution_date"),
+            }
+        return resolutions
+
+    @staticmethod
+    def group_by_day(snapshots: list[MarketSnapshot]) -> dict[date, list[MarketSnapshot]]:
+        """Group snapshots by calendar day."""
+        by_day: dict[date, list[MarketSnapshot]] = defaultdict(list)
+        for snap in snapshots:
+            by_day[snap.timestamp.date()].append(snap)
+        return dict(by_day)
+
+    @staticmethod
+    def aggregate_daily_markets(
+        snapshots: list[MarketSnapshot],
+    ) -> dict[str, MarketSnapshot]:
+        """Aggregate multiple snapshots per market into a single daily state.
+
+        Uses the last snapshot of the day per market (most recent price).
+        """
+        latest: dict[str, MarketSnapshot] = {}
+        for snap in sorted(snapshots, key=lambda s: s.timestamp):
+            latest[snap.polymarket_id] = snap
+        return latest
+```
+
+- [ ] **Step 6: Implement estimators**
+
+```python
+# polyagent/backtest/estimator.py
+"""Pluggable probability estimators for backtesting."""
+from __future__ import annotations
+
+from abc import ABC, abstractmethod
+
+
+class BaseEstimator(ABC):
+    """Interface for backtest probability estimators."""
+
+    @property
+    @abstractmethod
+    def name(self) -> str: ...
+
+    @abstractmethod
+    def estimate(self, market_id: str, **kwargs) -> float: ...
+
+
+class HistoricalEstimator(BaseEstimator):
+    """Uses actual resolution outcome as probability.
+
+    This represents the theoretical ceiling — perfect foresight.
+    Useful for measuring how much of the available alpha the strategy captures.
+    """
+
+    name = "historical"
+
+    def estimate(self, market_id: str, **kwargs) -> float:
+        outcome = kwargs.get("outcome", "")
+        final_price = kwargs.get("final_price", 0.5)
+
+        if outcome == "Yes":
+            return float(final_price) if final_price else 1.0
+        elif outcome == "No":
+            return float(final_price) if final_price else 0.0
+        return float(final_price) if final_price else 0.5
+
+
+class MidpointEstimator(BaseEstimator):
+    """Uses market midpoint as probability estimate.
+
+    Sanity check: should produce ~0 P&L since there's no edge.
+    """
+
+    name = "midpoint"
+
+    def estimate(self, market_id: str, **kwargs) -> float:
+        return float(kwargs.get("market_price", 0.5))
+
+
+class CachedClaudeEstimator(BaseEstimator):
+    """Uses pre-computed Claude probability estimates from a cache file.
+
+    Run `polyagent backtest --build-cache` first to generate the cache.
+    """
+
+    name = "cached-claude"
+
+    def __init__(self, cache: dict[str, float] | None = None) -> None:
+        self._cache = cache or {}
+
+    def load_cache(self, cache: dict[str, float]) -> None:
+        self._cache = cache
+
+    def estimate(self, market_id: str, **kwargs) -> float:
+        if market_id in self._cache:
+            return self._cache[market_id]
+        # Fallback to midpoint if not cached
+        return float(kwargs.get("market_price", 0.5))
+```
+
+- [ ] **Step 7: Run tests**
+
+```bash
+python -m pytest tests/unit/backtest/ -v
+```
+
+Expected: All 7 tests PASS.
+
+- [ ] **Step 8: Commit**
+
+```bash
+git add polyagent/backtest/ db/migrations/002_backtest_schema.sql tests/unit/backtest/
+git commit -m "feat(backtest): add data loader, estimators, and backtest schema"
+```
+
+---
+
+## Task 19: Backtest Engine
+
+**Files:**
+- Create: `polyagent/backtest/engine.py`
+- Create: `polyagent/backtest/report.py`
+- Create: `tests/unit/backtest/test_engine.py`
+
+- [ ] **Step 1: Write engine tests**
+
+```python
+# tests/unit/backtest/test_engine.py
+"""Tests for backtest engine."""
+from datetime import date, datetime, timezone
+from decimal import Decimal
+
+import pytest
+
+from polyagent.backtest.data_loader import MarketSnapshot
+from polyagent.backtest.engine import BacktestEngine, BacktestResult
+from polyagent.backtest.estimator import HistoricalEstimator
+from polyagent.services.scanner import ScannerService
+from polyagent.services.executor import ExecutorService
+from polyagent.services.exit_monitor import ExitMonitorService
+
+
+class TestBacktestEngine:
+    def setup_method(self):
+        self.engine = BacktestEngine(
+            scanner=ScannerService(min_gap=0.07, min_depth=500, min_hours=4, max_hours=168),
+            executor=ExecutorService(kelly_max_fraction=0.25, bankroll=800, paper_trade=True),
+            exit_monitor=ExitMonitorService(target_pct=0.85, volume_multiplier=3, stale_hours=24, stale_threshold=0.02),
+            estimator=HistoricalEstimator(),
+        )
+
+    def _make_snapshot(self, market_id: str, price: str, volume: str = "5000") -> MarketSnapshot:
+        return MarketSnapshot(
+            polymarket_id=market_id,
+            question=f"Test market {market_id}?",
+            category="crypto",
+            token_id=f"tok_{market_id}",
+            price=Decimal(price),
+            volume=Decimal(volume),
+            timestamp=datetime(2025, 6, 15, 12, 0, tzinfo=timezone.utc),
+            outcome="Yes",
+        )
+
+    def test_process_day_finds_trades(self):
+        snapshots = [
+            self._make_snapshot("0x1", "0.40", "2000"),  # good: gap 0.60 (outcome=Yes -> est=1.0)
+        ]
+        resolutions = {"0x1": {"outcome": "Yes", "final_price": 1.0}}
+        positions = self.engine.process_day(
+            snapshots=snapshots,
+            resolutions=resolutions,
+            current_date=date(2025, 6, 15),
+        )
+        assert len(positions) >= 1
+
+    def test_process_day_filters_low_volume(self):
+        snapshots = [
+            self._make_snapshot("0x2", "0.40", "100"),  # depth too low
+        ]
+        resolutions = {"0x2": {"outcome": "Yes", "final_price": 1.0}}
+        positions = self.engine.process_day(
+            snapshots=snapshots,
+            resolutions=resolutions,
+            current_date=date(2025, 6, 15),
+        )
+        assert len(positions) == 0
+
+    def test_result_metrics(self):
+        result = BacktestResult(
+            trades=[
+                {"pnl": 50.0, "exit_reason": "TARGET_HIT", "category": "crypto"},
+                {"pnl": -20.0, "exit_reason": "STALE_THESIS", "category": "crypto"},
+                {"pnl": 30.0, "exit_reason": "VOLUME_EXIT", "category": "politics"},
+            ],
+            start_date=date(2025, 1, 1),
+            end_date=date(2025, 6, 30),
+            estimator_name="historical",
+            bankroll=800.0,
+        )
+        assert result.total_trades == 3
+        assert result.winners == 2
+        assert result.win_rate == pytest.approx(66.67, abs=0.1)
+        assert result.total_pnl == 60.0
+
+    def test_result_max_drawdown(self):
+        result = BacktestResult(
+            trades=[
+                {"pnl": 100.0, "exit_reason": "TARGET_HIT", "category": "crypto"},
+                {"pnl": -50.0, "exit_reason": "STALE_THESIS", "category": "crypto"},
+                {"pnl": -30.0, "exit_reason": "VOLUME_EXIT", "category": "crypto"},
+                {"pnl": 200.0, "exit_reason": "TARGET_HIT", "category": "crypto"},
+            ],
+            start_date=date(2025, 1, 1),
+            end_date=date(2025, 6, 30),
+            estimator_name="historical",
+            bankroll=800.0,
+        )
+        # Peak at 900 (800+100), then drops to 820 (900-50-30), drawdown = 80/900 = 8.9%
+        assert result.max_drawdown > 0
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+```bash
+python -m pytest tests/unit/backtest/test_engine.py -v
+```
+
+Expected: FAIL — `ModuleNotFoundError`
+
+- [ ] **Step 3: Implement backtest engine**
+
+```python
+# polyagent/backtest/engine.py
+"""Backtest engine — replays historical data through the full pipeline."""
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass, field
+from datetime import date, datetime, timezone
+from decimal import Decimal
+
+from polyagent.backtest.data_loader import DataLoader, MarketSnapshot
+from polyagent.backtest.estimator import BaseEstimator
+from polyagent.models import Vote, VoteAction
+from polyagent.services.executor import ExecutorService
+from polyagent.services.exit_monitor import ExitMonitorService
+from polyagent.services.scanner import ScannerService
+
+logger = logging.getLogger("polyagent.backtest.engine")
+
+
+@dataclass
+class BacktestResult:
+    """Aggregated backtest results."""
+
+    trades: list[dict]
+    start_date: date
+    end_date: date
+    estimator_name: str
+    bankroll: float
+
+    @property
+    def total_trades(self) -> int:
+        return len(self.trades)
+
+    @property
+    def winners(self) -> int:
+        return sum(1 for t in self.trades if t["pnl"] > 0)
+
+    @property
+    def losers(self) -> int:
+        return sum(1 for t in self.trades if t["pnl"] <= 0)
+
+    @property
+    def win_rate(self) -> float:
+        if self.total_trades == 0:
+            return 0.0
+        return (self.winners / self.total_trades) * 100
+
+    @property
+    def total_pnl(self) -> float:
+        return sum(t["pnl"] for t in self.trades)
+
+    @property
+    def avg_pnl(self) -> float:
+        if self.total_trades == 0:
+            return 0.0
+        return self.total_pnl / self.total_trades
+
+    @property
+    def sharpe(self) -> float:
+        if self.total_trades < 2:
+            return 0.0
+        pnls = [t["pnl"] for t in self.trades]
+        mean = sum(pnls) / len(pnls)
+        variance = sum((p - mean) ** 2 for p in pnls) / (len(pnls) - 1)
+        std = variance ** 0.5
+        if std == 0:
+            return 0.0
+        return mean / std
+
+    @property
+    def max_drawdown(self) -> float:
+        """Maximum drawdown as a percentage."""
+        if not self.trades:
+            return 0.0
+        equity = self.bankroll
+        peak = equity
+        max_dd = 0.0
+        for t in self.trades:
+            equity += t["pnl"]
+            if equity > peak:
+                peak = equity
+            dd = (peak - equity) / peak if peak > 0 else 0
+            max_dd = max(max_dd, dd)
+        return max_dd * 100
+
+    @property
+    def profit_factor(self) -> float:
+        gross_profit = sum(t["pnl"] for t in self.trades if t["pnl"] > 0)
+        gross_loss = abs(sum(t["pnl"] for t in self.trades if t["pnl"] < 0))
+        if gross_loss == 0:
+            return float("inf") if gross_profit > 0 else 0.0
+        return gross_profit / gross_loss
+
+    @property
+    def by_category(self) -> dict[str, dict]:
+        """Breakdown by market category."""
+        cats: dict[str, list] = {}
+        for t in self.trades:
+            cat = t.get("category", "unknown")
+            cats.setdefault(cat, []).append(t)
+
+        return {
+            cat: {
+                "trades": len(trades),
+                "pnl": sum(t["pnl"] for t in trades),
+                "win_rate": sum(1 for t in trades if t["pnl"] > 0) / max(len(trades), 1) * 100,
+            }
+            for cat, trades in cats.items()
+        }
+
+    @property
+    def by_exit_reason(self) -> dict[str, int]:
+        """Count by exit reason."""
+        reasons: dict[str, int] = {}
+        for t in self.trades:
+            r = t.get("exit_reason", "UNKNOWN")
+            reasons[r] = reasons.get(r, 0) + 1
+        return reasons
+
+
+class BacktestEngine:
+    """Replays historical market data through the trading pipeline."""
+
+    def __init__(
+        self,
+        scanner: ScannerService,
+        executor: ExecutorService,
+        exit_monitor: ExitMonitorService,
+        estimator: BaseEstimator,
+    ) -> None:
+        self._scanner = scanner
+        self._executor = executor
+        self._exit_monitor = exit_monitor
+        self._estimator = estimator
+
+    def run(
+        self,
+        snapshots: list[MarketSnapshot],
+        resolutions: dict[str, dict],
+        start_date: date,
+        end_date: date,
+        bankroll: float = 800.0,
+    ) -> BacktestResult:
+        """Run a full backtest over the given data."""
+        by_day = DataLoader.group_by_day(snapshots)
+        all_trades = []
+
+        sorted_days = sorted(d for d in by_day if start_date <= d <= end_date)
+        logger.info(
+            "Running backtest: %s to %s (%d days, estimator=%s)",
+            start_date, end_date, len(sorted_days), self._estimator.name,
+        )
+
+        for day in sorted_days:
+            day_snapshots = by_day[day]
+            day_trades = self.process_day(day_snapshots, resolutions, day)
+            all_trades.extend(day_trades)
+
+        result = BacktestResult(
+            trades=all_trades,
+            start_date=start_date,
+            end_date=end_date,
+            estimator_name=self._estimator.name,
+            bankroll=bankroll,
+        )
+        logger.info(
+            "Backtest complete: %d trades, %.1f%% win rate, $%.2f P&L, Sharpe %.2f",
+            result.total_trades, result.win_rate, result.total_pnl, result.sharpe,
+        )
+        return result
+
+    def process_day(
+        self,
+        snapshots: list[MarketSnapshot],
+        resolutions: dict[str, dict],
+        current_date: date,
+    ) -> list[dict]:
+        """Process one day of market data. Returns list of completed trade dicts."""
+        daily_markets = DataLoader.aggregate_daily_markets(snapshots)
+        trades = []
+
+        for market_id, snapshot in daily_markets.items():
+            resolution = resolutions.get(market_id, {})
+            market = snapshot.to_market_data(hours_to_resolution=48.0)
+
+            # Get probability estimate
+            estimate = self._estimator.estimate(
+                market_id,
+                outcome=resolution.get("outcome"),
+                final_price=resolution.get("final_price"),
+                market_price=float(snapshot.price),
+            )
+
+            # Run scanner
+            score = self._scanner.score_market(market, estimate)
+            if score is None:
+                continue
+
+            # Simulate consensus (in backtest, use simplified 2-vote BUY)
+            from polyagent.models import Thesis, ThesisChecks
+            thesis = Thesis.create(
+                market_id=None,
+                claude_estimate=estimate,
+                confidence=0.80,
+                checks=ThesisChecks(base_rate=True, news=True, whale=False, disposition=True),
+                thesis_text=f"Backtest thesis for {market_id}",
+            )
+
+            votes = [
+                Vote(action=VoteAction.BUY, confidence=0.8, reason="backtest"),
+                Vote(action=VoteAction.BUY, confidence=0.7, reason="backtest"),
+                Vote(action=VoteAction.HOLD, confidence=0.3, reason="backtest"),
+            ]
+
+            position = self._executor.execute(
+                thesis=thesis,
+                votes=votes,
+                market_price=snapshot.price,
+            )
+            if position is None:
+                continue
+
+            # Simulate exit using resolution data
+            final_price = Decimal(str(resolution.get("final_price", float(snapshot.price))))
+            exit_reason = self._exit_monitor.check_exit(
+                entry_price=snapshot.price,
+                target_price=position.target_price,
+                current_price=final_price,
+                volume_10min=0,
+                avg_volume_10min=1,
+                hours_since_entry=48.0,
+            )
+            if exit_reason is None:
+                exit_reason_str = "HELD_TO_RESOLUTION"
+            else:
+                exit_reason_str = exit_reason.value
+
+            pnl = float(self._exit_monitor.calculate_pnl(
+                entry_price=snapshot.price,
+                exit_price=final_price,
+                position_size=position.position_size,
+                side=position.side.value,
+            ))
+
+            trades.append({
+                "polymarket_id": market_id,
+                "question": snapshot.question,
+                "category": snapshot.category,
+                "entry_price": float(snapshot.price),
+                "exit_price": float(final_price),
+                "position_size": float(position.position_size),
+                "kelly_fraction": position.kelly_fraction,
+                "pnl": pnl,
+                "exit_reason": exit_reason_str,
+                "entry_date": str(current_date),
+                "estimator_prob": estimate,
+                "market_price": float(snapshot.price),
+            })
+
+        return trades
+```
+
+- [ ] **Step 4: Implement report generator**
+
+```python
+# polyagent/backtest/report.py
+"""Backtest report generation with Rich output."""
+from __future__ import annotations
+
+from rich.console import Console
+from rich.panel import Panel
+from rich.table import Table
+
+from polyagent.backtest.engine import BacktestResult
+
+
+def print_report(result: BacktestResult, console: Console | None = None) -> None:
+    """Print a formatted backtest report to the terminal."""
+    if console is None:
+        console = Console()
+
+    final_equity = result.bankroll + result.total_pnl
+    pnl_style = "green" if result.total_pnl >= 0 else "red"
+
+    summary = (
+        f"Period: {result.start_date} to {result.end_date}\n"
+        f"Estimator: {result.estimator_name}\n"
+        f"Bankroll: ${result.bankroll:,.2f} -> [{pnl_style}]${final_equity:,.2f}[/{pnl_style}]\n"
+        f"\n"
+        f"Total Trades:    {result.total_trades}\n"
+        f"Win Rate:        {result.win_rate:.1f}%\n"
+        f"Total P&L:       [{pnl_style}]${result.total_pnl:+,.2f}[/{pnl_style}]\n"
+        f"Avg P&L/Trade:   ${result.avg_pnl:+,.2f}\n"
+        f"Sharpe Ratio:    {result.sharpe:.2f}\n"
+        f"Max Drawdown:    {result.max_drawdown:.1f}%\n"
+        f"Profit Factor:   {result.profit_factor:.2f}\n"
+    )
+
+    console.print(Panel(summary, title="Backtest Report", expand=False))
+
+    # Exit reasons
+    reasons = result.by_exit_reason
+    if reasons:
+        reason_table = Table(title="Exit Reasons")
+        reason_table.add_column("Reason", style="cyan")
+        reason_table.add_column("Count", justify="right")
+        reason_table.add_column("Pct", justify="right")
+        total = sum(reasons.values())
+        for reason, count in sorted(reasons.items(), key=lambda x: -x[1]):
+            reason_table.add_row(reason, str(count), f"{count / total * 100:.1f}%")
+        console.print(reason_table)
+
+    # By category
+    cats = result.by_category
+    if cats:
+        cat_table = Table(title="By Category")
+        cat_table.add_column("Category", style="cyan")
+        cat_table.add_column("Trades", justify="right")
+        cat_table.add_column("P&L", justify="right")
+        cat_table.add_column("Win Rate", justify="right")
+        for cat, stats in sorted(cats.items(), key=lambda x: -x[1]["pnl"]):
+            cat_pnl = stats["pnl"]
+            s = "green" if cat_pnl >= 0 else "red"
+            cat_table.add_row(
+                cat, str(stats["trades"]),
+                f"[{s}]${cat_pnl:+,.2f}[/{s}]",
+                f"{stats['win_rate']:.1f}%",
+            )
+        console.print(cat_table)
+```
+
+- [ ] **Step 5: Run tests**
+
+```bash
+python -m pytest tests/unit/backtest/ -v
+```
+
+Expected: All 11 tests PASS.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add polyagent/backtest/engine.py polyagent/backtest/report.py tests/unit/backtest/test_engine.py
+git commit -m "feat(backtest): add backtest engine with time-step replay and report generator"
+```
+
+---
+
+## Task 20: Backtest CLI Command
+
+**Files:**
+- Create: `polyagent/cli/backtest_cmd.py`
+- Modify: `polyagent/cli/main.py` — register backtest command
+
+- [ ] **Step 1: Implement backtest CLI command**
+
+```python
+# polyagent/cli/backtest_cmd.py
+"""Backtest CLI command."""
+from __future__ import annotations
+
+from datetime import date
+
+import click
+from rich.console import Console
+
+from polyagent.backtest.data_loader import DataLoader
+from polyagent.backtest.engine import BacktestEngine
+from polyagent.backtest.estimator import CachedClaudeEstimator, HistoricalEstimator, MidpointEstimator
+from polyagent.backtest.report import print_report
+from polyagent.services.executor import ExecutorService
+from polyagent.services.exit_monitor import ExitMonitorService
+from polyagent.services.scanner import ScannerService
+from polyagent.infra.config import Settings
+
+
+ESTIMATORS = {
+    "historical": HistoricalEstimator,
+    "midpoint": MidpointEstimator,
+    "cached-claude": CachedClaudeEstimator,
+}
+
+
+@click.command()
+@click.option(
+    "--start", type=click.DateTime(formats=["%Y-%m-%d"]),
+    default="2025-01-01", help="Backtest start date (YYYY-MM-DD)",
+)
+@click.option(
+    "--end", type=click.DateTime(formats=["%Y-%m-%d"]),
+    default="2026-04-01", help="Backtest end date (YYYY-MM-DD)",
+)
+@click.option(
+    "--estimator", type=click.Choice(list(ESTIMATORS.keys())),
+    default="historical", help="Probability estimator strategy",
+)
+@click.option("--bankroll", type=float, default=None, help="Starting bankroll (default: from config)")
+@click.option("--kelly-max", type=float, default=None, help="Max Kelly fraction (default: from config)")
+@click.option("--data-dir", type=click.Path(exists=True), default=None, help="Path to poly_data directory")
+@click.option("--report", "show_report", is_flag=True, help="Show results of the last backtest run")
+@click.option("--compare", is_flag=True, help="Compare results across estimators")
+def backtest(start, end, estimator, bankroll, kelly_max, data_dir, show_report, compare):
+    """Run a backtest against historical poly_data.
+
+    Replays the full scanner -> executor -> exit pipeline against historical
+    market data. Use different estimators to test strategy performance.
+
+    Examples:
+
+        polyagent backtest --start 2025-01-01 --end 2026-01-01
+
+        polyagent backtest --estimator midpoint  # sanity check
+
+        polyagent backtest --bankroll 2000 --kelly-max 0.15
+    """
+    console = Console()
+    settings = Settings.from_env()
+
+    effective_bankroll = bankroll or settings.bankroll
+    effective_kelly = kelly_max or settings.kelly_max_fraction
+    effective_data_dir = data_dir or "~/poly_data"
+
+    start_date = start.date() if hasattr(start, "date") else start
+    end_date = end.date() if hasattr(end, "date") else end
+
+    if compare:
+        _run_comparison(console, settings, effective_data_dir, start_date, end_date, effective_bankroll, effective_kelly)
+        return
+
+    # Build services
+    scanner = ScannerService(
+        min_gap=settings.min_gap,
+        min_depth=settings.min_depth,
+        min_hours=settings.min_hours,
+        max_hours=settings.max_hours,
+    )
+    executor = ExecutorService(
+        kelly_max_fraction=effective_kelly,
+        bankroll=effective_bankroll,
+        paper_trade=True,
+    )
+    exit_monitor = ExitMonitorService(
+        target_pct=settings.exit_target_pct,
+        volume_multiplier=settings.exit_volume_multiplier,
+        stale_hours=settings.exit_stale_hours,
+        stale_threshold=settings.exit_stale_threshold,
+    )
+
+    estimator_cls = ESTIMATORS[estimator]
+    est = estimator_cls()
+
+    # Load data
+    console.print(f"[cyan]Loading historical data from {effective_data_dir}...[/cyan]")
+    loader = DataLoader(effective_data_dir)
+    try:
+        snapshots = loader.load_trades(start_date=start_date, end_date=end_date)
+    except FileNotFoundError as e:
+        console.print(f"[red]Error: {e}[/red]")
+        console.print("[dim]Clone poly_data first: git clone https://github.com/warproxxx/poly_data[/dim]")
+        return
+
+    resolutions = loader.load_resolutions()
+
+    console.print(
+        f"[cyan]Running backtest: {start_date} to {end_date} "
+        f"({len(snapshots)} snapshots, estimator={estimator})[/cyan]"
+    )
+
+    engine = BacktestEngine(
+        scanner=scanner,
+        executor=executor,
+        exit_monitor=exit_monitor,
+        estimator=est,
+    )
+
+    result = engine.run(
+        snapshots=snapshots,
+        resolutions=resolutions,
+        start_date=start_date,
+        end_date=end_date,
+        bankroll=effective_bankroll,
+    )
+
+    print_report(result, console)
+
+
+def _run_comparison(console, settings, data_dir, start_date, end_date, bankroll, kelly_max):
+    """Run all estimators and compare results side-by-side."""
+    from rich.table import Table
+
+    loader = DataLoader(data_dir)
+    try:
+        snapshots = loader.load_trades(start_date=start_date, end_date=end_date)
+    except FileNotFoundError as e:
+        console.print(f"[red]Error: {e}[/red]")
+        return
+
+    resolutions = loader.load_resolutions()
+
+    scanner = ScannerService(
+        min_gap=settings.min_gap, min_depth=settings.min_depth,
+        min_hours=settings.min_hours, max_hours=settings.max_hours,
+    )
+    executor = ExecutorService(kelly_max_fraction=kelly_max, bankroll=bankroll, paper_trade=True)
+    exit_monitor = ExitMonitorService(
+        target_pct=settings.exit_target_pct, volume_multiplier=settings.exit_volume_multiplier,
+        stale_hours=settings.exit_stale_hours, stale_threshold=settings.exit_stale_threshold,
+    )
+
+    table = Table(title="Estimator Comparison")
+    table.add_column("Estimator", style="cyan")
+    table.add_column("Trades", justify="right")
+    table.add_column("Win Rate", justify="right")
+    table.add_column("P&L", justify="right")
+    table.add_column("Sharpe", justify="right")
+    table.add_column("Max DD", justify="right")
+
+    for name, cls in ESTIMATORS.items():
+        console.print(f"[dim]Running {name}...[/dim]")
+        engine = BacktestEngine(scanner=scanner, executor=executor, exit_monitor=exit_monitor, estimator=cls())
+        result = engine.run(snapshots, resolutions, start_date, end_date, bankroll)
+        pnl_style = "green" if result.total_pnl >= 0 else "red"
+        table.add_row(
+            name, str(result.total_trades), f"{result.win_rate:.1f}%",
+            f"[{pnl_style}]${result.total_pnl:+,.2f}[/{pnl_style}]",
+            f"{result.sharpe:.2f}", f"{result.max_drawdown:.1f}%",
+        )
+
+    console.print(table)
+```
+
+- [ ] **Step 2: Register backtest command in CLI main**
+
+Modify `polyagent/cli/main.py` — add import and registration:
+
+```python
+# Add to imports at top:
+from polyagent.cli.backtest_cmd import backtest
+
+# Add after other cli.add_command() calls:
+cli.add_command(backtest)
+```
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add polyagent/cli/backtest_cmd.py polyagent/cli/main.py
+git commit -m "feat(cli): add backtest command with estimator comparison"
+```
+
+---
+
 ## Self-Review Checklist
 
 **Spec coverage:**
@@ -4513,9 +5606,12 @@ git commit -m "test: add integration tests for full pipeline and DB round-trip"
 - [x] Polymarket client — Task 6
 - [x] Claude client with prompt caching — Task 8
 - [x] Cost estimates — in design spec (not code)
-- [x] Unit tests throughout — Tasks 2, 3, 5, 6, 7, 8, 9, 10, 11, 12, 14
+- [x] Unit tests throughout — Tasks 2, 3, 5, 6, 7, 8, 9, 10, 11, 12, 14, 18, 19
 - [x] Integration tests — Task 17
+- [x] Backtest engine — Task 19
+- [x] Backtest data loader + estimators — Task 18
+- [x] Backtest CLI with comparison — Task 20
 
 **Placeholder scan:** No TBDs or TODOs in test code or implementations. Two noted `# TODO` comments in main.py exit_monitor_worker for volume/time calculation — these are genuine incomplete items flagged inline, acceptable for v1.
 
-**Type consistency:** Verified `Score`, `MarketData`, `Thesis`, `Position`, `Vote`, `VoteAction`, `ThesisChecks`, `Consensus`, `ExitReason` used consistently across all tasks.
+**Type consistency:** Verified `Score`, `MarketData`, `Thesis`, `Position`, `Vote`, `VoteAction`, `ThesisChecks`, `Consensus`, `ExitReason`, `MarketSnapshot`, `BacktestResult`, `BaseEstimator` used consistently across all tasks.

@@ -533,6 +533,120 @@ Switching to live: set `PAPER_TRADE=false`, provide Polymarket wallet credential
 
 ---
 
+## Backtest Engine
+
+Replays the full pipeline against historical poly_data to validate strategy performance before risking real capital.
+
+### Architecture
+
+The backtest engine reuses the same service layer as live trading (scanner, executor, exit monitor) to guarantee consistency. The brain is swappable: use cached Claude responses for cheap replays, or call Claude live for full-fidelity backtests.
+
+```
+polyagent/
+├── backtest/
+│   ├── __init__.py
+│   ├── engine.py           # BacktestEngine — drives the time-step loop
+│   ├── data_loader.py      # Loads poly_data CSVs into MarketData snapshots
+│   ├── estimator.py        # Pluggable probability estimators (historical, Claude, random)
+│   └── report.py           # Performance metrics and summary output
+```
+
+### How It Works
+
+1. **Load historical data** — `data_loader.py` reads poly_data CSVs (trades, markets, prices) and builds time-ordered snapshots. Each snapshot represents the market state at a point in time.
+
+2. **Replay loop** — The engine iterates through time steps (configurable granularity: hourly, 4-hourly, daily). At each step:
+   - Scanner scores all active markets against the estimator's probability
+   - Brain evaluation is pluggable: `HistoricalEstimator` (uses actual outcome as hindsight baseline), `CachedClaudeEstimator` (pre-computed Claude responses), or `LiveClaudeEstimator` (real API calls, ~$2-5 per full run)
+   - Executor runs consensus + Kelly sizing
+   - Exit monitor checks triggers using future price data from the next time steps
+
+3. **Track positions** — All positions written to a `backtest_runs` table (separate from live positions) with the run ID, parameters used, and results.
+
+4. **Generate report** — Win rate, total P&L, Sharpe ratio, max drawdown, profit factor, average hold time, exit reason distribution, performance by category.
+
+### Estimator Strategies
+
+| Estimator | Cost | Use Case |
+|-----------|------|----------|
+| `HistoricalEstimator` | $0 | Uses actual resolution outcome as "perfect" estimate. Shows theoretical ceiling. |
+| `MidpointEstimator` | $0 | Uses market midpoint as estimate (sanity check — should produce ~0 P&L). |
+| `CachedClaudeEstimator` | ~$2-5 once | Run Claude against historical markets once, cache responses, replay free. |
+| `LiveClaudeEstimator` | ~$2-5/run | Full-fidelity: calls Claude API for each market evaluation. |
+
+### CLI Commands
+
+```
+polyagent backtest --start 2025-01-01 --end 2026-04-01  # Run backtest with defaults
+polyagent backtest --estimator cached-claude             # Use pre-cached Claude estimates
+polyagent backtest --bankroll 1000 --kelly-max 0.15      # Override parameters
+polyagent backtest --report                              # Show results of last run
+polyagent backtest --compare                             # Compare multiple runs side-by-side
+```
+
+### Backtest Report Output
+
+```
+╭─────────────────── Backtest Report ───────────────────╮
+│ Period: 2025-01-01 to 2026-04-01 (456 days)           │
+│ Estimator: CachedClaude                               │
+│ Bankroll: $800 → $X,XXX                               │
+│                                                       │
+│ Total Trades:    XXX                                   │
+│ Win Rate:        XX.X%                                 │
+│ Total P&L:       $X,XXX.XX                             │
+│ Sharpe Ratio:    X.XX                                  │
+│ Max Drawdown:    X.X%                                  │
+│ Profit Factor:   X.XX                                  │
+│ Avg Hold Time:   XX.Xh                                 │
+│                                                       │
+│ Exit Reasons:                                          │
+│   TARGET_HIT:    XX%                                   │
+│   VOLUME_EXIT:   XX%                                   │
+│   STALE_THESIS:  XX%                                   │
+│                                                       │
+│ By Category:                                           │
+│   crypto:     +$X,XXX (XX trades, XX% win)             │
+│   politics:   +$XXX   (XX trades, XX% win)             │
+│   macro:      -$XX    (XX trades, XX% win)             │
+╰───────────────────────────────────────────────────────╯
+```
+
+### Database Table
+
+```sql
+CREATE TABLE backtest_runs (
+    id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    started_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    completed_at    TIMESTAMPTZ,
+    date_start      DATE NOT NULL,
+    date_end        DATE NOT NULL,
+    estimator       TEXT NOT NULL,
+    parameters      JSONB NOT NULL,
+    results         JSONB,
+    total_trades    INTEGER,
+    win_rate        DECIMAL,
+    total_pnl       DECIMAL,
+    sharpe          DECIMAL,
+    max_drawdown    DECIMAL
+);
+```
+
+### Cost Optimization Note
+
+The original hourly cost estimate of ~$403/mo assumed Sonnet 4 for every evaluation. Revised approach:
+
+| Optimization | Savings |
+|-------------|---------|
+| Use Haiku 4.5 for scanner probability estimates | ~80% on scanner calls |
+| Thesis dedup via pgvector (skip similar markets) | ~20-30% on brain calls |
+| Tighter kill filters (fewer markets reach brain) | ~40% on brain calls |
+| **Combined** | **~$40-60/mo at hourly frequency** |
+
+Backtesting with `CachedClaudeEstimator` costs ~$2-5 one-time to build the cache, then $0 per replay.
+
+---
+
 ## What's Excluded (for now)
 
 - Frontend dashboard (CLI-first)
