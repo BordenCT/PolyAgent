@@ -55,6 +55,11 @@ class Settings:
     voyage_api_key: str | None
     polymarket_api_url: str
 
+    # Ollama (local LLM for scanner estimates)
+    ollama_url: str
+    ollama_model: str
+    ollama_enabled: bool
+
     @staticmethod
     def from_env() -> Settings:
         """Load settings from environment variables.
@@ -90,4 +95,7 @@ class Settings:
             polymarket_api_url=_env_str(
                 "POLYMARKET_API_URL", "https://clob.polymarket.com"
             ),
+            ollama_url=_env_str("OLLAMA_URL", "http://192.168.1.56:11434"),
+            ollama_model=_env_str("OLLAMA_MODEL", "phi4:14b"),
+            ollama_enabled=_env_bool("OLLAMA_ENABLED", True),
         )

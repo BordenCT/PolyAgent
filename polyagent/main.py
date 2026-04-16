@@ -25,6 +25,7 @@ from polyagent.services.exit_monitor import ExitMonitorService
 from polyagent.services.scanner import ScannerService
 from polyagent.strategies.arbitrage import ArbitrageStrategy
 from polyagent.strategies.convergence import ConvergenceStrategy
+from polyagent.data.clients.ollama import OllamaClient
 from polyagent.strategies.whale_copy import WhaleCopyStrategy
 
 logger = logging.getLogger("polyagent.main")
@@ -45,6 +46,16 @@ def run() -> None:
     polymarket = PolymarketClient(base_url=settings.polymarket_api_url)
     claude = ClaudeClient(api_key=settings.anthropic_api_key)
     embeddings = EmbeddingsService(api_key=settings.voyage_api_key)
+
+    # Local LLM for scanner estimates (zero cost)
+    ollama = None
+    if settings.ollama_enabled:
+        ollama = OllamaClient(base_url=settings.ollama_url, model=settings.ollama_model)
+        if ollama.health_check():
+            logger.info("Ollama connected: %s @ %s", settings.ollama_model, settings.ollama_url)
+        else:
+            logger.warning("Ollama unreachable at %s — falling back to midpoint estimates", settings.ollama_url)
+            ollama = None
 
     # Repositories
     market_repo = MarketRepository(db)
@@ -93,8 +104,12 @@ def run() -> None:
                     if parsed:
                         markets.append(parsed)
 
-                # Use midpoint as fallback estimate (pgvector lookup in future)
-                estimates = {m.polymarket_id: float(m.midpoint_price) for m in markets}
+                # Get probability estimates: Ollama (free) or midpoint fallback
+                if ollama:
+                    questions = [{"id": m.polymarket_id, "question": m.question} for m in markets]
+                    estimates = ollama.estimate_batch(questions)
+                else:
+                    estimates = {m.polymarket_id: float(m.midpoint_price) for m in markets}
                 survivors = scanner.scan_batch(markets, estimates)
 
                 for market, score in survivors:
@@ -232,6 +247,8 @@ def run() -> None:
         logger.info("Shutting down...")
         polymarket.close()
         claude.close()
+        if ollama:
+            ollama.close()
         db.close()
         pool.join_all(timeout=10)
         logger.info("PolyAgent stopped")

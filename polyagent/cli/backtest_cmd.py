@@ -8,7 +8,7 @@ from rich.console import Console
 
 from polyagent.backtest.data_loader import DataLoader
 from polyagent.backtest.engine import BacktestEngine
-from polyagent.backtest.estimator import CachedClaudeEstimator, HistoricalEstimator, MidpointEstimator
+from polyagent.backtest.estimator import CachedClaudeEstimator, HistoricalEstimator, MidpointEstimator, OllamaEstimator
 from polyagent.backtest.report import print_report
 from polyagent.services.executor import ExecutorService
 from polyagent.services.exit_monitor import ExitMonitorService
@@ -20,6 +20,7 @@ ESTIMATORS = {
     "historical": HistoricalEstimator,
     "midpoint": MidpointEstimator,
     "cached-claude": CachedClaudeEstimator,
+    "ollama": OllamaEstimator,
 }
 
 

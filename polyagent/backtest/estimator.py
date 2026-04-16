@@ -47,6 +47,26 @@ class MidpointEstimator(BaseEstimator):
         return float(kwargs.get("market_price", 0.5))
 
 
+class OllamaEstimator(BaseEstimator):
+    """Uses local Ollama (phi4:14b) for probability estimates.
+
+    Zero cost, runs against the local LXC at 192.168.1.56.
+    Slower than cached estimators but free and uses actual LLM reasoning.
+    """
+
+    name = "ollama"
+
+    def __init__(self, ollama_url: str = "http://192.168.1.56:11434", model: str = "phi4:14b") -> None:
+        from polyagent.data.clients.ollama import OllamaClient
+        self._client = OllamaClient(base_url=ollama_url, model=model)
+
+    def estimate(self, market_id: str, **kwargs) -> float:
+        question = kwargs.get("question", "")
+        if not question:
+            return float(kwargs.get("market_price", 0.5))
+        return self._client.estimate_probability(question)
+
+
 class CachedClaudeEstimator(BaseEstimator):
     """Uses pre-computed Claude probability estimates from a cache file.
 
