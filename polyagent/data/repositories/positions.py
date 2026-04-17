@@ -15,12 +15,12 @@ INSERT_POSITION = """
     INSERT INTO positions (
         id, thesis_id, market_id, side, entry_price, target_price,
         kelly_fraction, position_size, current_price, status,
-        paper_trade, opened_at
+        paper_trade, opened_at, volume_at_entry
     ) VALUES (
         %(id)s, %(thesis_id)s, %(market_id)s, %(side)s,
         %(entry_price)s, %(target_price)s, %(kelly_fraction)s,
         %(position_size)s, %(current_price)s, %(status)s,
-        %(paper_trade)s, %(opened_at)s
+        %(paper_trade)s, %(opened_at)s, %(volume_at_entry)s
     )
 """
 
@@ -78,6 +78,7 @@ class PositionRepository:
                     "status": position.status.value,
                     "paper_trade": position.paper_trade,
                     "opened_at": position.opened_at,
+                    "volume_at_entry": position.volume_at_entry,
                 },
             )
 

@@ -4,19 +4,23 @@ from __future__ import annotations
 import logging
 import signal
 import time
+from datetime import datetime, timezone
+from decimal import Decimal
 from queue import Empty
 
 from polyagent.data.clients.claude import ClaudeClient
+from polyagent.data.clients.ollama import OllamaClient
 from polyagent.data.clients.polymarket import PolymarketClient
 from polyagent.data.repositories.historical import HistoricalRepository
 from polyagent.data.repositories.markets import MarketRepository
 from polyagent.data.repositories.positions import PositionRepository
 from polyagent.data.repositories.thesis import ThesisRepository
+from polyagent.data.repositories.trade_log import TradeLogRepository
 from polyagent.infra.config import Settings
 from polyagent.infra.database import Database
 from polyagent.infra.logging import setup_logging
 from polyagent.infra.pool import WorkerPool
-from polyagent.infra.queues import Queues, ScanResult
+from polyagent.infra.queues import Queues, ScanResult, ThesisResult
 from polyagent.models import MarketStatus
 from polyagent.services.brain import BrainService
 from polyagent.services.embeddings import EmbeddingsService
@@ -25,7 +29,6 @@ from polyagent.services.exit_monitor import ExitMonitorService
 from polyagent.services.scanner import ScannerService
 from polyagent.strategies.arbitrage import ArbitrageStrategy
 from polyagent.strategies.convergence import ConvergenceStrategy
-from polyagent.data.clients.ollama import OllamaClient
 from polyagent.strategies.whale_copy import WhaleCopyStrategy
 
 logger = logging.getLogger("polyagent.main")
@@ -35,18 +38,19 @@ def run() -> None:
     """Main entry point for the bot."""
     setup_logging()
     settings = Settings.from_env()
-    logger.info("PolyAgent starting (paper_trade=%s)", settings.paper_trade)
+    live_enabled = not settings.paper_trade and settings.polymarket_live_enabled
+    logger.info(
+        "PolyAgent starting (paper_trade=%s, live_enabled=%s)",
+        settings.paper_trade, live_enabled,
+    )
 
-    # Infrastructure
     db = Database(settings)
     queues = Queues()
     pool = WorkerPool()
 
-    # Clients
     polymarket = PolymarketClient(base_url=settings.polymarket_api_url)
     embeddings = EmbeddingsService(api_key=settings.voyage_api_key)
 
-    # LLM provider routing
     ollama = None
     claude = None
     if settings.llm_provider in ("ollama", "hybrid"):
@@ -64,7 +68,6 @@ def run() -> None:
         elif settings.llm_provider == "claude":
             raise ValueError("LLM_PROVIDER=claude but ANTHROPIC_API_KEY is not set")
 
-    # Select brain evaluator based on provider
     if settings.llm_provider == "ollama" and ollama:
         brain_evaluator = ollama
         logger.info("Brain using: Ollama phi4:14b ($0)")
@@ -77,13 +80,12 @@ def run() -> None:
     else:
         raise RuntimeError("No LLM available for brain evaluation")
 
-    # Repositories
     market_repo = MarketRepository(db)
     thesis_repo = ThesisRepository(db)
     position_repo = PositionRepository(db)
     historical_repo = HistoricalRepository(db)
+    trade_log_repo = TradeLogRepository(db)
 
-    # Services
     scanner = ScannerService(
         min_gap=settings.min_gap,
         min_depth=settings.min_depth,
@@ -111,8 +113,6 @@ def run() -> None:
 
     strategies = [ArbitrageStrategy(), ConvergenceStrategy(), WhaleCopyStrategy()]
 
-    # --- Worker functions ---
-
     def scanner_worker():
         """Fetch markets, score, push survivors to scan_queue."""
         while queues.shutdown.empty():
@@ -124,7 +124,6 @@ def run() -> None:
                     if parsed:
                         markets.append(parsed)
 
-                # Get probability estimates: Ollama (free) or midpoint fallback
                 if ollama:
                     questions = [{"id": m.polymarket_id, "question": m.question} for m in markets]
                     estimates = ollama.estimate_batch(questions)
@@ -144,14 +143,14 @@ def run() -> None:
                 time.sleep(60)
 
     def brain_worker():
-        """Pull from scan_queue, evaluate via Claude, push to thesis_queue."""
+        """Pull from scan_queue, evaluate, push to thesis_queue."""
         while queues.shutdown.empty():
             try:
                 scan_result = queues.scan_queue.get(timeout=30)
                 thesis = brain.evaluate(scan_result.market, scan_result.market_db_id)
                 if thesis:
                     thesis_repo.insert(thesis)
-                    queues.thesis_queue.put(thesis)
+                    queues.thesis_queue.put(ThesisResult(thesis=thesis, market=scan_result.market))
                 else:
                     market_repo.update_status(scan_result.market_db_id, MarketStatus.REJECTED)
                 queues.scan_queue.task_done()
@@ -164,9 +163,9 @@ def run() -> None:
         """Pull from thesis_queue, run consensus, execute trades."""
         while queues.shutdown.empty():
             try:
-                thesis = queues.thesis_queue.get(timeout=30)
+                item = queues.thesis_queue.get(timeout=30)
+                thesis, market = item.thesis, item.market
 
-                # Run all strategies
                 votes = []
                 for strategy in strategies:
                     if hasattr(strategy, "name") and strategy.name == "whale_copy":
@@ -174,26 +173,48 @@ def run() -> None:
                     elif hasattr(strategy, "name") and strategy.name == "convergence":
                         vote = strategy.evaluate(
                             claude_estimate=thesis.claude_estimate,
-                            market_price=float(thesis.claude_estimate) - 0.1,
+                            market_price=float(market.midpoint_price),
                             price_history=[],
                         )
                     else:
                         vote = strategy.evaluate(
                             claude_estimate=thesis.claude_estimate,
-                            market_price=float(thesis.claude_estimate) - 0.1,
+                            market_price=float(market.midpoint_price),
                             related_markets=[],
                         )
                     votes.append(vote)
 
-                from decimal import Decimal
-                position = executor.execute(
-                    thesis=thesis,
-                    votes=votes,
-                    market_price=Decimal(str(round(thesis.claude_estimate - 0.1, 4))),
-                )
+                if live_enabled:
+                    position = executor.execute_live(
+                        thesis=thesis,
+                        votes=votes,
+                        market=market,
+                        polymarket_client=polymarket,
+                        trade_log=trade_log_repo,
+                    )
+                else:
+                    position = executor.execute(
+                        thesis=thesis,
+                        votes=votes,
+                        market_price=market.midpoint_price,
+                        volume_at_entry=market.volume_24h,
+                    )
+
                 if position:
                     position_repo.insert(position)
                     market_repo.update_status(thesis.market_id, MarketStatus.TRADED)
+                    if not live_enabled:
+                        trade_log_repo.insert(
+                            position_id=position.id,
+                            action="OPEN_PAPER",
+                            reason=thesis.consensus.value,
+                            raw_request={
+                                "token_id": market.token_id,
+                                "side": position.side.value,
+                                "price": float(position.entry_price),
+                                "size": float(position.position_size),
+                            },
+                        )
 
                 thesis_repo.update_votes(
                     thesis.id,
@@ -207,36 +228,57 @@ def run() -> None:
                 logger.exception("Executor error")
 
     def exit_monitor_worker():
-        """Poll open positions, check exit triggers."""
+        """Poll open positions, refresh state, fire exit triggers."""
         while queues.shutdown.empty():
             try:
                 open_positions = position_repo.get_open()
                 for pos in open_positions:
-                    # In paper mode, fetch current price from Polymarket
+                    snapshot = polymarket.fetch_market_state(pos["polymarket_id"])
+                    current_price = snapshot["midpoint_price"] if snapshot else pos["current_price"]
+                    current_volume = float(snapshot["volume_24h"]) if snapshot else float(pos.get("volume_at_entry") or 0)
+
+                    if snapshot and current_price != pos["current_price"]:
+                        position_repo.update_price(pos["id"], current_price)
+
+                    hours_since_entry = _hours_since(pos["opened_at"])
+                    volume_at_entry = float(pos.get("volume_at_entry") or 0)
+                    avg_rate = volume_at_entry / 144.0
+                    current_rate = current_volume / 144.0
+
                     reason = exit_monitor.check_exit(
                         entry_price=pos["entry_price"],
                         target_price=pos["target_price"],
-                        current_price=pos["current_price"],
-                        volume_10min=0,  # TODO: fetch real volume
-                        avg_volume_10min=1,
-                        hours_since_entry=0,  # TODO: calculate from opened_at
+                        current_price=current_price,
+                        volume_10min=current_rate,
+                        avg_volume_10min=avg_rate,
+                        hours_since_entry=hours_since_entry,
                     )
                     if reason:
                         pnl = exit_monitor.calculate_pnl(
                             entry_price=pos["entry_price"],
-                            exit_price=pos["current_price"],
+                            exit_price=current_price,
                             position_size=pos["position_size"],
                             side=pos["side"],
                         )
-                        position_repo.close(pos["id"], reason, pnl, pos["current_price"])
+                        position_repo.close(pos["id"], reason, pnl, current_price)
+                        trade_log_repo.insert(
+                            position_id=pos["id"],
+                            action="CLOSE_PAPER" if pos.get("paper_trade", True) else "CLOSE_LIVE",
+                            reason=reason.value,
+                            raw_request={
+                                "entry_price": float(pos["entry_price"]),
+                                "exit_price": float(current_price),
+                                "position_size": float(pos["position_size"]),
+                                "hours_since_entry": hours_since_entry,
+                            },
+                        )
                         logger.info("CLOSED %s — %s pnl=$%.2f", pos["id"], reason.value, pnl)
 
-                time.sleep(60)  # Check every minute
+                time.sleep(60)
             except Exception:
                 logger.exception("Exit monitor error")
                 time.sleep(60)
 
-    # --- Spawn workers ---
     n_scanner = pool.compute_workers("scanner", 3, settings.scanner_workers)
     n_brain = pool.compute_workers("brain", 6, settings.brain_workers)
     n_executor = pool.compute_workers("executor", 24, settings.executor_workers)
@@ -252,7 +294,6 @@ def run() -> None:
         n_scanner, n_brain, n_executor, n_exit,
     )
 
-    # Graceful shutdown
     def shutdown_handler(signum, frame):
         logger.info("Shutdown signal received")
         queues.shutdown.put(True)
@@ -273,6 +314,15 @@ def run() -> None:
         db.close()
         pool.join_all(timeout=10)
         logger.info("PolyAgent stopped")
+
+
+def _hours_since(ts) -> float:
+    """Hours elapsed between ts (timezone-aware datetime) and now."""
+    if ts is None:
+        return 0.0
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - ts).total_seconds() / 3600.0
 
 
 if __name__ == "__main__":

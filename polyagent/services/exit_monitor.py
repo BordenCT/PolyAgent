@@ -24,6 +24,22 @@ class ExitMonitorService:
         self._stale_hours = stale_hours
         self._stale_threshold = stale_threshold
 
+    @property
+    def target_pct(self) -> float:
+        return self._target_pct
+
+    @property
+    def volume_multiplier(self) -> float:
+        return self._volume_multiplier
+
+    @property
+    def stale_hours(self) -> float:
+        return self._stale_hours
+
+    @property
+    def stale_threshold(self) -> float:
+        return self._stale_threshold
+
     def check_exit(
         self,
         entry_price: Decimal,

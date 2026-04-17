@@ -17,8 +17,19 @@ class ScanResult:
 
 
 @dataclass
+class ThesisResult:
+    """Output of the brain: a thesis plus the live market data it was built from.
+
+    Carrying the market through to the executor lets the executor size against
+    fresh price/volume and attribute volume_at_entry to the opened position.
+    """
+    thesis: Thesis
+    market: MarketData
+
+
+@dataclass
 class Queues:
     """All inter-thread queues for the pipeline."""
     scan_queue: Queue[ScanResult] = field(default_factory=Queue)
-    thesis_queue: Queue[Thesis] = field(default_factory=Queue)
+    thesis_queue: Queue[ThesisResult] = field(default_factory=Queue)
     shutdown: Queue[bool] = field(default_factory=Queue)

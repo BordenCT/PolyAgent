@@ -197,6 +197,7 @@ class Position:
         paper_trade: True if this is a simulated (paper) trade.
         opened_at: UTC timestamp when position was opened.
         closed_at: UTC timestamp when position was closed, or None.
+        volume_at_entry: Market 24h volume at time of entry (used by volume-spike exit trigger).
     """
     id: UUID
     thesis_id: UUID
@@ -213,6 +214,7 @@ class Position:
     paper_trade: bool
     opened_at: datetime
     closed_at: datetime | None
+    volume_at_entry: Decimal = Decimal("0")
 
     @staticmethod
     def open_paper(
@@ -223,6 +225,7 @@ class Position:
         target_price: Decimal,
         kelly_fraction: float,
         position_size: Decimal,
+        volume_at_entry: Decimal = Decimal("0"),
     ) -> Position:
         """Factory method to open a new paper (simulated) position.
 
@@ -234,10 +237,59 @@ class Position:
             target_price: Desired exit price.
             kelly_fraction: Kelly fraction applied to sizing.
             position_size: USD size of the position.
+            volume_at_entry: 24h market volume at time of entry.
 
         Returns:
             A new OPEN paper Position with zero PnL and no exit reason.
         """
+        return Position._open(
+            thesis_id, market_id, side, entry_price, target_price,
+            kelly_fraction, position_size, volume_at_entry, paper=True,
+        )
+
+    @staticmethod
+    def open_live(
+        thesis_id: UUID,
+        market_id: UUID,
+        side: PositionSide,
+        entry_price: Decimal,
+        target_price: Decimal,
+        kelly_fraction: float,
+        position_size: Decimal,
+        volume_at_entry: Decimal = Decimal("0"),
+    ) -> Position:
+        """Factory method to open a new live (real-money) position.
+
+        Args:
+            thesis_id: The thesis driving this trade.
+            market_id: The market to trade.
+            side: BUY or SELL.
+            entry_price: Opening price (from broker fill).
+            target_price: Desired exit price.
+            kelly_fraction: Kelly fraction applied to sizing.
+            position_size: USD size of the position.
+            volume_at_entry: 24h market volume at time of entry.
+
+        Returns:
+            A new OPEN live Position with zero PnL and no exit reason.
+        """
+        return Position._open(
+            thesis_id, market_id, side, entry_price, target_price,
+            kelly_fraction, position_size, volume_at_entry, paper=False,
+        )
+
+    @staticmethod
+    def _open(
+        thesis_id: UUID,
+        market_id: UUID,
+        side: PositionSide,
+        entry_price: Decimal,
+        target_price: Decimal,
+        kelly_fraction: float,
+        position_size: Decimal,
+        volume_at_entry: Decimal,
+        paper: bool,
+    ) -> Position:
         return Position(
             id=uuid4(),
             thesis_id=thesis_id,
@@ -251,7 +303,8 @@ class Position:
             status=PositionStatus.OPEN,
             exit_reason=None,
             pnl=Decimal("0"),
-            paper_trade=True,
+            paper_trade=paper,
             opened_at=datetime.now(timezone.utc),
             closed_at=None,
+            volume_at_entry=volume_at_entry,
         )

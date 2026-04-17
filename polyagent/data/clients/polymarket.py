@@ -114,6 +114,97 @@ class PolymarketClient:
             logger.warning("CLI order book fetch failed for %s: %s", token_id, e)
         return {}
 
+    def fetch_market_state(self, condition_id: str) -> dict | None:
+        """Fetch a fresh price + 24h volume snapshot for one market.
+
+        Used by the exit monitor to refresh current_price and detect volume spikes.
+
+        Args:
+            condition_id: Polymarket market condition id.
+
+        Returns:
+            Dict with keys 'midpoint_price' and 'volume_24h', or None on failure.
+        """
+        try:
+            resp = self._http.get(f"/markets/{condition_id}")
+            resp.raise_for_status()
+            raw = resp.json()
+            best_bid = float(raw.get("best_bid", 0) or 0)
+            best_ask = float(raw.get("best_ask", 0) or 0)
+            midpoint = (best_bid + best_ask) / 2 if best_bid and best_ask else best_bid or best_ask
+            return {
+                "midpoint_price": Decimal(str(round(midpoint, 4))),
+                "volume_24h": Decimal(str(raw.get("volume", 0) or 0)),
+            }
+        except (httpx.HTTPError, ValueError) as e:
+            logger.warning("Failed to refresh market state for %s: %s", condition_id, e)
+            return None
+
+    def place_order(
+        self,
+        token_id: str,
+        side: str,
+        price: float,
+        size: float,
+    ) -> dict:
+        """Place an order on the CLOB via the polymarket CLI.
+
+        Returns a dict with:
+            - 'ok': bool — True on exit code 0 with parsable JSON
+            - 'request': echo of the invocation args
+            - 'response': parsed JSON response on success
+            - 'error': error message on failure
+            - 'stderr': captured stderr for diagnostics
+
+        Args:
+            token_id: The outcome token ID to trade.
+            side: "BUY" or "SELL".
+            price: Limit price in the 0-1 range.
+            size: Notional size in USD.
+        """
+        request = {
+            "token_id": token_id,
+            "side": side.upper(),
+            "price": price,
+            "size": size,
+        }
+
+        cmd = [
+            "polymarket", "clob", "order", "create",
+            "--token-id", token_id,
+            "--side", side.upper(),
+            "--price", str(price),
+            "--size", str(size),
+            "-o", "json",
+        ]
+
+        try:
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=30,
+            )
+        except (subprocess.TimeoutExpired, FileNotFoundError) as e:
+            return {"ok": False, "request": request, "error": f"subprocess failed: {e}"}
+
+        if result.returncode != 0:
+            return {
+                "ok": False,
+                "request": request,
+                "error": f"exit code {result.returncode}",
+                "stderr": result.stderr,
+            }
+
+        try:
+            response = json.loads(result.stdout)
+        except json.JSONDecodeError as e:
+            return {
+                "ok": False,
+                "request": request,
+                "error": f"invalid JSON response: {e}",
+                "stderr": result.stderr,
+            }
+
+        return {"ok": True, "request": request, "response": response}
+
     def close(self) -> None:
         """Close the HTTP client."""
         self._http.close()

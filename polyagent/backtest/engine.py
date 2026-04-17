@@ -1,16 +1,25 @@
-"""Backtest engine — replays historical data through the full pipeline."""
+"""Path-aware backtest engine.
+
+Replays historical trade data hour-by-hour and simulates the full entry + exit
+pipeline (scanner -> executor -> exit monitor) against each bar. Unlike a
+resolution-only backtest, exits fire when a bar's high/low touches the target
+(TARGET_HIT), when hourly volume spikes vs the entry baseline (VOLUME_EXIT),
+or when the thesis goes stale (STALE_THESIS). Only positions still open at the
+market's final observed bar are force-closed at the resolution price.
+"""
 from __future__ import annotations
 
 import logging
+from collections import deque
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from decimal import Decimal
 
 from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
 
-from polyagent.backtest.data_loader import DataLoader, MarketSnapshot
+from polyagent.backtest.data_loader import DataLoader, HourlyBar
 from polyagent.backtest.estimator import BaseEstimator
-from polyagent.models import Vote, VoteAction
+from polyagent.models import ExitReason, Thesis, ThesisChecks, Vote, VoteAction
 from polyagent.services.executor import ExecutorService
 from polyagent.services.exit_monitor import ExitMonitorService
 from polyagent.services.scanner import ScannerService
@@ -70,7 +79,6 @@ class BacktestResult:
 
     @property
     def max_drawdown(self) -> float:
-        """Maximum drawdown as a percentage."""
         if not self.trades:
             return 0.0
         equity = self.bankroll
@@ -94,7 +102,6 @@ class BacktestResult:
 
     @property
     def by_category(self) -> dict[str, dict]:
-        """Breakdown by market category."""
         cats: dict[str, list] = {}
         for t in self.trades:
             cat = t.get("category", "unknown")
@@ -111,12 +118,29 @@ class BacktestResult:
 
     @property
     def by_exit_reason(self) -> dict[str, int]:
-        """Count by exit reason."""
         reasons: dict[str, int] = {}
         for t in self.trades:
             r = t.get("exit_reason", "UNKNOWN")
             reasons[r] = reasons.get(r, 0) + 1
         return reasons
+
+
+@dataclass
+class _OpenPosition:
+    """Ephemeral bookkeeping for a live backtest position."""
+
+    market_id: str
+    question: str
+    category: str
+    side: str
+    entry_price: Decimal
+    target_price: Decimal
+    position_size: Decimal
+    kelly_fraction: float
+    estimator_prob: float
+    entry_hour: datetime
+    entry_hourly_volume: float
+    trailing_volume: float
 
 
 class BacktestEngine:
@@ -136,41 +160,110 @@ class BacktestEngine:
 
     def run(
         self,
-        snapshots: list[MarketSnapshot],
+        bars: list[HourlyBar],
         resolutions: dict[str, dict],
         start_date: date,
         end_date: date,
         bankroll: float = 800.0,
         market_metadata: dict[str, dict] | None = None,
     ) -> BacktestResult:
-        """Run a full backtest over the given data."""
-        by_day = DataLoader.group_by_day(snapshots)
-        all_trades = []
+        """Replay the bars chronologically, firing entries and exits on each hour."""
+        metadata = market_metadata or {}
+        filtered = [
+            b for b in bars
+            if start_date <= b.hour.date() <= end_date
+        ]
+        filtered.sort(key=lambda b: (b.hour, b.market_id))
+        by_hour = DataLoader.group_by_hour(filtered)
+        sorted_hours = sorted(by_hour.keys())
+        last_bar_hour: dict[str, datetime] = {}
+        for b in filtered:
+            last_bar_hour[b.market_id] = b.hour
 
-        sorted_days = sorted(d for d in by_day if start_date <= d <= end_date)
         logger.info(
-            "Running backtest: %s to %s (%d days, estimator=%s)",
-            start_date, end_date, len(sorted_days), self._estimator.name,
+            "Running backtest: %s to %s (%d hours, %d bars, estimator=%s)",
+            start_date, end_date, len(sorted_hours), len(filtered), self._estimator.name,
         )
+
+        open_positions: dict[str, _OpenPosition] = {}
+        evaluated: set[str] = set()
+        trades: list[dict] = []
+        rolling_volumes: dict[str, deque] = {}
+        running_pnl = 0.0
+
+        def _equity_label() -> str:
+            equity = bankroll + running_pnl
+            pct = (running_pnl / bankroll * 100) if bankroll > 0 else 0.0
+            sign = "+" if running_pnl >= 0 else ""
+            return f"${equity:,.2f} ({sign}{pct:.1f}%)"
 
         progress = Progress(
             SpinnerColumn(),
             TextColumn("[cyan]Backtesting"),
             BarColumn(bar_width=40),
-            TextColumn("[green]{task.completed}/{task.total} days"),
+            TextColumn("[green]{task.completed}/{task.total} hours"),
             TextColumn("[yellow]{task.fields[trades]} trades"),
+            TextColumn("[magenta]{task.fields[equity]}"),
             TimeElapsedColumn(),
         )
         with progress:
-            task = progress.add_task("backtest", total=len(sorted_days), trades=0)
-            for day in sorted_days:
-                day_snapshots = by_day[day]
-                day_trades = self.process_day(day_snapshots, resolutions, day, market_metadata or {})
-                all_trades.extend(day_trades)
-                progress.update(task, advance=1, trades=len(all_trades))
+            task = progress.add_task(
+                "backtest", total=len(sorted_hours), trades=0, equity=_equity_label(),
+            )
+
+            for hour in sorted_hours:
+                hour_bars = by_hour[hour]
+
+                for bar in hour_bars:
+                    vol_deque = rolling_volumes.setdefault(bar.market_id, deque(maxlen=24))
+                    vol_deque.append(float(bar.volume))
+
+                    if bar.market_id in open_positions:
+                        closed = self._maybe_close(
+                            open_positions[bar.market_id], bar, rolling=vol_deque,
+                        )
+                        if closed is not None:
+                            trades.append(closed)
+                            running_pnl += closed["pnl"]
+                            del open_positions[bar.market_id]
+                        # If the bar we just processed is the market's last
+                        # observed bar and we still hold — force close.
+                        elif last_bar_hour.get(bar.market_id) == bar.hour:
+                            forced = self._force_close(
+                                open_positions[bar.market_id], bar, resolutions,
+                            )
+                            trades.append(forced)
+                            running_pnl += forced["pnl"]
+                            del open_positions[bar.market_id]
+
+                    elif bar.market_id not in evaluated:
+                        evaluated.add(bar.market_id)
+                        position = self._maybe_enter(
+                            bar,
+                            metadata=metadata,
+                            resolutions=resolutions,
+                            rolling_volume=sum(vol_deque),
+                        )
+                        if position is not None:
+                            open_positions[bar.market_id] = position
+
+                progress.update(task, advance=1, trades=len(trades), equity=_equity_label())
+
+        # Markets whose last bar was outside the requested range still need closing.
+        for market_id, pos in list(open_positions.items()):
+            resolution = resolutions.get(market_id, {})
+            final_price = resolution.get("final_price")
+            if final_price is None:
+                continue
+            tail = self._close(
+                pos, exit_price=Decimal(str(round(float(final_price), 6))),
+                reason="RESOLUTION", exit_hour=pos.entry_hour,
+            )
+            trades.append(tail)
+            running_pnl += tail["pnl"]
 
         result = BacktestResult(
-            trades=all_trades,
+            trades=trades,
             start_date=start_date,
             end_date=end_date,
             estimator_name=self._estimator.name,
@@ -182,110 +275,184 @@ class BacktestEngine:
         )
         return result
 
-    def process_day(
+    def _maybe_enter(
         self,
-        snapshots: list[MarketSnapshot],
+        bar: HourlyBar,
+        metadata: dict[str, dict],
         resolutions: dict[str, dict],
-        current_date: date,
-        market_metadata: dict[str, dict] | None = None,
-    ) -> list[dict]:
-        """Process one day of market data. Returns list of completed trade dicts."""
-        daily_markets = DataLoader.aggregate_daily_markets(snapshots)
-        metadata = market_metadata or {}
-        trades = []
+        rolling_volume: float,
+    ) -> _OpenPosition | None:
+        """Decide whether to enter on this bar. Returns an open position or None."""
+        resolution = resolutions.get(bar.market_id)
+        if not resolution or resolution.get("final_price") is None:
+            return None
 
-        for market_id, snapshot in daily_markets.items():
-            resolution = resolutions.get(market_id, {})
-            final_price_raw = resolution.get("final_price")
+        meta = metadata.get(bar.market_id, {})
+        bar.question = meta.get("question", bar.question)
+        bar.category = meta.get("category", bar.category)
+        bar.token_id = meta.get("token_id", bar.token_id)
 
-            # Skip markets with no resolution data — can't evaluate P&L
-            if final_price_raw is None:
-                continue
+        hours_to_resolution = _hours_until(resolution.get("resolution_date"), bar.hour)
+        market = bar.to_market_data(
+            hours_to_resolution=hours_to_resolution,
+            volume_24h=Decimal(str(round(rolling_volume, 2))),
+        )
 
-            final_price = float(final_price_raw)
-            entry_price = float(snapshot.price)
+        estimate = self._estimator.estimate(
+            bar.market_id,
+            outcome=resolution.get("outcome"),
+            final_price=float(resolution["final_price"]),
+            market_price=float(bar.close),
+            question=bar.question,
+        )
 
-            # Skip if entry and final are the same — no signal
-            if abs(final_price - entry_price) < 0.001:
-                continue
+        score = self._scanner.score_market(market, estimate)
+        if score is None:
+            return None
 
-            # Enrich with metadata
-            meta = metadata.get(market_id, {})
-            category = meta.get("category", snapshot.category)
-            question = meta.get("question", snapshot.question)
+        thesis = Thesis.create(
+            market_id=None,
+            claude_estimate=estimate,
+            confidence=0.80,
+            checks=ThesisChecks(base_rate=True, news=True, whale=False, disposition=True),
+            thesis_text=f"Backtest thesis for {bar.market_id}",
+        )
 
-            market = snapshot.to_market_data(hours_to_resolution=48.0)
+        votes = [
+            Vote(action=VoteAction.BUY, confidence=0.8, reason="backtest"),
+            Vote(action=VoteAction.BUY, confidence=0.7, reason="backtest"),
+            Vote(action=VoteAction.HOLD, confidence=0.3, reason="backtest"),
+        ]
 
-            # Get probability estimate
-            estimate = self._estimator.estimate(
-                market_id,
-                outcome=resolution.get("outcome"),
-                final_price=final_price,
-                market_price=entry_price,
-                question=question,
+        plan = self._executor.plan(thesis=thesis, votes=votes, market_price=bar.close)
+        if plan is None:
+            return None
+
+        return _OpenPosition(
+            market_id=bar.market_id,
+            question=bar.question,
+            category=bar.category,
+            side=plan.side.value,
+            entry_price=plan.market_price,
+            target_price=plan.target_price,
+            position_size=plan.position_size,
+            kelly_fraction=plan.kelly_fraction,
+            estimator_prob=estimate,
+            entry_hour=bar.hour,
+            entry_hourly_volume=float(bar.volume),
+            trailing_volume=rolling_volume,
+        )
+
+    def _maybe_close(
+        self,
+        position: _OpenPosition,
+        bar: HourlyBar,
+        rolling: deque,
+    ) -> dict | None:
+        """Check the three exit triggers against this bar. Close if any fire."""
+        entry_price = float(position.entry_price)
+        target_price = float(position.target_price)
+
+        # TARGET_HIT — take-profit fills during the hour if the high touched target.
+        if position.side == "BUY" and float(bar.high) >= target_price and target_price > entry_price:
+            return self._close(
+                position,
+                exit_price=Decimal(str(round(target_price, 6))),
+                reason=ExitReason.TARGET_HIT.value,
+                exit_hour=bar.hour,
             )
 
-            # Run scanner
-            score = self._scanner.score_market(market, estimate)
-            if score is None:
-                continue
+        hours_since_entry = (bar.hour - position.entry_hour).total_seconds() / 3600.0
 
-            # Simulate consensus (in backtest, use simplified 2-vote BUY)
-            from polyagent.models import Thesis, ThesisChecks
-            thesis = Thesis.create(
-                market_id=None,
-                claude_estimate=estimate,
-                confidence=0.80,
-                checks=ThesisChecks(base_rate=True, news=True, whale=False, disposition=True),
-                thesis_text=f"Backtest thesis for {market_id}",
+        # VOLUME_EXIT — this bar's hourly volume vs the entry bar's hourly volume.
+        entry_hourly = position.entry_hourly_volume
+        current_hourly = float(bar.volume)
+        if (
+            entry_hourly > 0
+            and hours_since_entry >= 1
+            and current_hourly > entry_hourly * self._exit_monitor.volume_multiplier
+        ):
+            return self._close(
+                position,
+                exit_price=bar.close,
+                reason=ExitReason.VOLUME_EXIT.value,
+                exit_hour=bar.hour,
             )
 
-            votes = [
-                Vote(action=VoteAction.BUY, confidence=0.8, reason="backtest"),
-                Vote(action=VoteAction.BUY, confidence=0.7, reason="backtest"),
-                Vote(action=VoteAction.HOLD, confidence=0.3, reason="backtest"),
-            ]
+        # STALE_THESIS — configured stale window elapsed with sub-2% movement.
+        if hours_since_entry > self._exit_monitor.stale_hours:
+            move = abs(float(bar.close) - entry_price) / entry_price if entry_price > 0 else 0.0
+            if move < self._exit_monitor.stale_threshold:
+                return self._close(
+                    position,
+                    exit_price=bar.close,
+                    reason=ExitReason.STALE_THESIS.value,
+                    exit_hour=bar.hour,
+                )
 
-            position = self._executor.execute(
-                thesis=thesis,
-                votes=votes,
-                market_price=snapshot.price,
-            )
-            if position is None:
-                continue
+        return None
 
-            # Simulate exit — compare entry to final resolution price
-            exit_price_dec = Decimal(str(round(final_price, 6)))
-            target_price = float(position.target_price)
+    def _force_close(
+        self,
+        position: _OpenPosition,
+        bar: HourlyBar,
+        resolutions: dict[str, dict],
+    ) -> dict:
+        """Close at the market's resolution price at end of observed life."""
+        resolution = resolutions.get(position.market_id, {})
+        final_price = resolution.get("final_price")
+        exit_price = (
+            Decimal(str(round(float(final_price), 6))) if final_price is not None
+            else bar.close
+        )
+        return self._close(
+            position,
+            exit_price=exit_price,
+            reason="RESOLUTION",
+            exit_hour=bar.hour,
+        )
 
-            # Determine exit reason based on where final price landed
-            if entry_price < final_price and final_price >= target_price:
-                exit_reason_str = "TARGET_HIT"
-            elif entry_price < final_price:
-                exit_reason_str = "PARTIAL_PROFIT"
-            else:
-                exit_reason_str = "LOSS"
+    def _close(
+        self,
+        position: _OpenPosition,
+        exit_price: Decimal,
+        reason: str,
+        exit_hour: datetime,
+    ) -> dict:
+        pnl = float(self._exit_monitor.calculate_pnl(
+            entry_price=position.entry_price,
+            exit_price=exit_price,
+            position_size=position.position_size,
+            side=position.side,
+        ))
+        return {
+            "polymarket_id": position.market_id,
+            "question": position.question,
+            "category": position.category,
+            "side": position.side,
+            "entry_price": float(position.entry_price),
+            "exit_price": float(exit_price),
+            "target_price": float(position.target_price),
+            "position_size": float(position.position_size),
+            "kelly_fraction": position.kelly_fraction,
+            "pnl": pnl,
+            "exit_reason": reason,
+            "entry_date": position.entry_hour.isoformat(),
+            "exit_date": exit_hour.isoformat(),
+            "estimator_prob": position.estimator_prob,
+            "market_price": float(position.entry_price),
+        }
 
-            pnl = float(self._exit_monitor.calculate_pnl(
-                entry_price=snapshot.price,
-                exit_price=exit_price_dec,
-                position_size=position.position_size,
-                side=position.side.value,
-            ))
 
-            trades.append({
-                "polymarket_id": market_id,
-                "question": question,
-                "category": category,
-                "entry_price": entry_price,
-                "exit_price": final_price,
-                "position_size": float(position.position_size),
-                "kelly_fraction": position.kelly_fraction,
-                "pnl": pnl,
-                "exit_reason": exit_reason_str,
-                "entry_date": str(current_date),
-                "estimator_prob": estimate,
-                "market_price": entry_price,
-            })
-
-        return trades
+def _hours_until(resolution_date: str | None, from_hour: datetime) -> float:
+    """Best-effort hours between now and the market's resolution timestamp."""
+    if not resolution_date:
+        return 48.0
+    try:
+        res = datetime.fromisoformat(str(resolution_date).replace("Z", "+00:00"))
+    except ValueError:
+        return 48.0
+    if res.tzinfo is None:
+        res = res.replace(tzinfo=timezone.utc)
+    delta_hours = (res - from_hour).total_seconds() / 3600.0
+    return max(0.0, delta_hours)

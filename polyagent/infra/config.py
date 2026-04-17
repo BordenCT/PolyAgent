@@ -66,6 +66,9 @@ class Settings:
     ollama_model: str
     ollama_enabled: bool
 
+    # Live order placement — belt-and-suspenders safety gate on top of paper_trade
+    polymarket_live_enabled: bool
+
     @staticmethod
     def from_env() -> Settings:
         """Load settings from .env file and environment variables.
@@ -111,4 +114,5 @@ class Settings:
             ollama_url=_env_str("OLLAMA_URL", "http://192.168.1.56:11434"),
             ollama_model=_env_str("OLLAMA_MODEL", "phi4:14b"),
             ollama_enabled=_env_bool("OLLAMA_ENABLED", True),
+            polymarket_live_enabled=_env_bool("POLYMARKET_LIVE_ENABLED", False),
         )

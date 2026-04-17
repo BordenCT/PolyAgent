@@ -1,14 +1,14 @@
-"""Load trade data into daily market snapshots for backtesting.
+"""Load trade data into hourly OHLCV bars for path-aware backtesting.
 
-Handles datasets larger than RAM by aggregating in chunks via Polars
-batched reader — only the daily summaries stay in memory.
+Source trade files are chunked in memory via Polars' batched reader; only the
+aggregated hourly bars live in RAM.
 """
 from __future__ import annotations
 
 import logging
 from collections import defaultdict
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 
@@ -21,94 +21,63 @@ logger = logging.getLogger("polyagent.backtest.data_loader")
 
 
 @dataclass
-class MarketSnapshot:
-    """A single market's daily state — aggregated from raw trades."""
+class HourlyBar:
+    """One market's OHLCV bar over a single UTC hour."""
 
-    polymarket_id: str
-    question: str
-    category: str
-    token_id: str
-    price: Decimal
+    market_id: str
+    hour: datetime
+    open: Decimal
+    close: Decimal
+    high: Decimal
+    low: Decimal
     volume: Decimal
-    timestamp: datetime
-    outcome: str | None = None
+    first_ts: datetime
+    last_ts: datetime
+    question: str = ""
+    category: str = "unknown"
+    token_id: str = ""
 
-    def to_market_data(self, hours_to_resolution: float = 48.0) -> MarketData:
-        """Convert to MarketData for the scanner."""
+    def to_market_data(self, hours_to_resolution: float, volume_24h: Decimal) -> MarketData:
+        """Project this bar into the MarketData shape the scanner/executor expects."""
         return MarketData(
-            polymarket_id=self.polymarket_id,
+            polymarket_id=self.market_id,
             question=self.question,
             category=self.category,
             token_id=self.token_id,
-            midpoint_price=self.price,
+            midpoint_price=self.close,
             bids_depth=self.volume,
             asks_depth=self.volume,
             hours_to_resolution=hours_to_resolution,
-            volume_24h=self.volume,
-        )
-
-    @staticmethod
-    def parse_trade_row(row: dict) -> MarketSnapshot:
-        """Parse a single trade row from processed trades CSV."""
-        ts_str = row.get("timestamp", "")
-        if ts_str:
-            try:
-                ts = datetime.fromisoformat(str(ts_str).replace("Z", "+00:00"))
-            except ValueError:
-                ts = datetime.now(timezone.utc)
-        else:
-            ts = datetime.now(timezone.utc)
-
-        return MarketSnapshot(
-            polymarket_id=row.get("market_id", row.get("condition_id", "")),
-            question=row.get("question", ""),
-            category=row.get("category", "unknown"),
-            token_id=row.get("token_id", ""),
-            price=Decimal(str(row.get("price", 0))),
-            volume=Decimal(str(row.get("usd_amount", row.get("size", 0)))),
-            timestamp=ts,
-            outcome=row.get("outcome"),
+            volume_24h=volume_24h,
         )
 
 
 class DataLoader:
-    """Loads and organizes historical market data for backtesting.
-
-    Processes large CSVs in chunks — never loads the full file into memory.
-    Aggregates to daily market-level summaries for the backtest engine.
-    """
+    """Loads and organizes historical trade data as hourly bars."""
 
     def __init__(self, data_dir: str | Path) -> None:
         self._data_dir = Path(data_dir)
 
-    @staticmethod
-    def parse_trade_row(row: dict) -> MarketSnapshot:
-        return MarketSnapshot.parse_trade_row(row)
-
-    def load_trades(
+    def load_hourly_bars(
         self,
         start_date: date | None = None,
         end_date: date | None = None,
-        limit: int | None = None,
         chunk_size: int = 2_000_000,
-    ) -> list[MarketSnapshot]:
-        """Load trades as daily market snapshots, chunked to fit in RAM.
+    ) -> list[HourlyBar]:
+        """Load trades and aggregate into hourly OHLCV bars per market.
 
-        Instead of loading all 86M+ rows, this:
-        1. Reads the CSV in chunks
-        2. Aggregates each chunk to daily per-market summaries (last price, total volume)
-        3. Merges all chunk summaries
-        4. Returns a manageable list of MarketSnapshots (~one per market per day)
+        Cross-chunk merge: for each (hour, market) key, keep the earliest
+        observation's open and latest observation's close; accumulate high/low
+        by max/min and volume by sum. This yields a stable aggregate no matter
+        how chunk boundaries fall.
         """
         csv_path = self._data_dir / "processed" / "trades.csv"
         if not csv_path.exists():
             raise FileNotFoundError(f"Trades CSV not found at {csv_path}")
 
-        logger.info("Loading trades from %s (chunked)", csv_path)
+        logger.info("Loading trades from %s (chunked, hourly bars)", csv_path)
 
-        # Accumulate daily summaries across chunks
-        # Key: (date_str, market_id) -> {price, volume, count}
-        daily_agg: dict[tuple[str, str], dict] = {}
+        bars: dict[tuple[str, str], dict] = {}
 
         progress = Progress(
             SpinnerColumn(),
@@ -121,10 +90,7 @@ class DataLoader:
             task = progress.add_task("[cyan]Loading trades...", total=None)
             total_rows = 0
 
-            reader = pl.read_csv_batched(
-                str(csv_path),
-                batch_size=chunk_size,
-            )
+            reader = pl.read_csv_batched(str(csv_path), batch_size=chunk_size)
 
             while True:
                 batches = reader.next_batches(1)
@@ -135,85 +101,113 @@ class DataLoader:
                 total_rows += len(chunk)
                 progress.update(task, completed=total_rows)
 
-                # Extract date from timestamp
-                if "timestamp" in chunk.columns:
-                    chunk = chunk.with_columns(
-                        pl.col("timestamp").cast(pl.Utf8).str.slice(0, 10).alias("trade_date")
-                    )
-                else:
+                if "timestamp" not in chunk.columns:
                     continue
 
-                # Filter by date range
+                chunk = chunk.with_columns(
+                    pl.col("timestamp").cast(pl.Utf8).alias("_ts_str")
+                )
+                chunk = chunk.with_columns(
+                    pl.col("_ts_str").str.slice(0, 10).alias("trade_date"),
+                    pl.col("_ts_str").str.slice(0, 13).alias("hour_bucket"),
+                )
+
                 if start_date:
                     chunk = chunk.filter(pl.col("trade_date") >= str(start_date))
                 if end_date:
                     chunk = chunk.filter(pl.col("trade_date") <= str(end_date))
-
                 if len(chunk) == 0:
                     continue
 
-                # Aggregate: per (date, market_id) -> last price, total volume
-                market_col = "market_id" if "market_id" in chunk.columns else "condition_id"
-                if market_col not in chunk.columns:
+                market_col = (
+                    "market_id" if "market_id" in chunk.columns
+                    else "condition_id" if "condition_id" in chunk.columns
+                    else None
+                )
+                if not market_col:
+                    continue
+                if "price" not in chunk.columns:
                     continue
 
-                price_col = "price" if "price" in chunk.columns else None
-                vol_col = "usd_amount" if "usd_amount" in chunk.columns else "size" if "size" in chunk.columns else None
+                vol_col = (
+                    "usd_amount" if "usd_amount" in chunk.columns
+                    else "size" if "size" in chunk.columns
+                    else None
+                )
 
-                if not price_col:
-                    continue
+                # Sort within chunk so first/last reflect wall-clock order.
+                chunk = chunk.sort("_ts_str")
 
-                agg_exprs = [pl.col(price_col).last().alias("last_price")]
+                agg_exprs = [
+                    pl.col("price").first().alias("open"),
+                    pl.col("price").last().alias("close"),
+                    pl.col("price").max().alias("high"),
+                    pl.col("price").min().alias("low"),
+                    pl.col("_ts_str").first().alias("first_ts"),
+                    pl.col("_ts_str").last().alias("last_ts"),
+                ]
                 if vol_col:
-                    agg_exprs.append(pl.col(vol_col).sum().alias("total_volume"))
+                    agg_exprs.append(pl.col(vol_col).sum().alias("volume"))
 
-                daily = chunk.group_by(["trade_date", market_col]).agg(agg_exprs)
+                hourly = chunk.group_by(["hour_bucket", market_col]).agg(agg_exprs)
 
-                for row in daily.iter_rows(named=True):
-                    key = (row["trade_date"], row[market_col])
-                    price = float(row.get("last_price", 0))
-                    volume = float(row.get("total_volume", 0))
+                for row in hourly.iter_rows(named=True):
+                    key = (row["hour_bucket"], row[market_col])
+                    first_ts = str(row["first_ts"])
+                    last_ts = str(row["last_ts"])
+                    incoming = {
+                        "open": float(row["open"]),
+                        "close": float(row["close"]),
+                        "high": float(row["high"]),
+                        "low": float(row["low"]),
+                        "volume": float(row.get("volume") or 0),
+                        "first_ts": first_ts,
+                        "last_ts": last_ts,
+                    }
 
-                    if key in daily_agg:
-                        # Later chunk wins for price, volumes accumulate
-                        daily_agg[key]["price"] = price
-                        daily_agg[key]["volume"] += volume
+                    if key in bars:
+                        existing = bars[key]
+                        if first_ts < existing["first_ts"]:
+                            existing["open"] = incoming["open"]
+                            existing["first_ts"] = first_ts
+                        if last_ts > existing["last_ts"]:
+                            existing["close"] = incoming["close"]
+                            existing["last_ts"] = last_ts
+                        existing["high"] = max(existing["high"], incoming["high"])
+                        existing["low"] = min(existing["low"], incoming["low"])
+                        existing["volume"] += incoming["volume"]
                     else:
-                        daily_agg[key] = {"price": price, "volume": volume}
+                        bars[key] = incoming
 
-            progress.update(task, description=f"[green]Read {total_rows:,} rows -> {len(daily_agg):,} daily snapshots")
+            progress.update(
+                task,
+                description=f"[green]Read {total_rows:,} rows -> {len(bars):,} hourly bars",
+            )
 
-        # Convert to MarketSnapshots
-        snapshots = []
-        for (date_str, market_id), agg in daily_agg.items():
-            try:
-                ts = datetime.strptime(date_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
-            except ValueError:
+        result: list[HourlyBar] = []
+        for (hour_str, market_id), agg in bars.items():
+            hour = _parse_hour_bucket(hour_str)
+            if hour is None:
                 continue
-
-            snapshots.append(MarketSnapshot(
-                polymarket_id=market_id or "",
-                question="",
-                category="unknown",
-                token_id="",
-                price=Decimal(str(round(agg["price"], 6))),
+            result.append(HourlyBar(
+                market_id=market_id or "",
+                hour=hour,
+                open=Decimal(str(round(agg["open"], 6))),
+                close=Decimal(str(round(agg["close"], 6))),
+                high=Decimal(str(round(agg["high"], 6))),
+                low=Decimal(str(round(agg["low"], 6))),
                 volume=Decimal(str(round(agg["volume"], 2))),
-                timestamp=ts,
+                first_ts=_parse_ts(agg["first_ts"]) or hour,
+                last_ts=_parse_ts(agg["last_ts"]) or hour,
             ))
 
-        if limit:
-            snapshots = snapshots[:limit]
-
-        snapshots.sort(key=lambda s: s.timestamp)
-        logger.info("Produced %d market snapshots from %d rows", len(snapshots), total_rows)
-        return snapshots
+        result.sort(key=lambda b: (b.hour, b.market_id))
+        logger.info("Built %d hourly bars across %d markets",
+                    len(result), len({b.market_id for b in result}))
+        return result
 
     def load_market_metadata(self) -> dict[str, dict]:
-        """Load market questions and categories from markets.csv.
-
-        Keys by both `id` and `condition_id` since trades may reference either.
-        Returns dict mapping market_id -> {question, category}.
-        """
+        """Load market questions and categories from markets.csv."""
         markets_path = self._data_dir / "markets.csv"
         if not markets_path.exists():
             logger.warning("No markets.csv found at %s", markets_path)
@@ -223,13 +217,15 @@ class DataLoader:
             str(markets_path),
             schema_overrides={"token1": pl.Utf8, "token2": pl.Utf8},
         )
-        metadata = {}
+        metadata: dict[str, dict] = {}
         for row in df.iter_rows(named=True):
             question = row.get("question", "")
             category = self._detect_category(question)
-            entry = {"question": question, "category": category}
-
-            # Key by both id and condition_id for lookup flexibility
+            entry = {
+                "question": question,
+                "category": category,
+                "token_id": row.get("token1", "") or row.get("token_id", ""),
+            }
             market_id = row.get("id", "")
             condition_id = row.get("condition_id", "")
             if market_id:
@@ -241,13 +237,7 @@ class DataLoader:
         return metadata
 
     def load_resolutions(self) -> dict[str, dict]:
-        """Load or derive market resolution data.
-
-        First tries resolutions.csv. If not found, derives resolutions
-        from the trades data — the last traded price per market is used
-        as the final price.
-        """
-        # Try explicit resolutions file first
+        """Load or derive resolution data per market."""
         res_path = self._data_dir / "processed" / "resolutions.csv"
         if res_path.exists():
             df = pl.read_csv(str(res_path))
@@ -260,17 +250,15 @@ class DataLoader:
                 }
             return resolutions
 
-        # Derive from trades — last price per market
         logger.info("No resolutions.csv found, deriving from trades data...")
         return self._derive_resolutions()
 
     def _derive_resolutions(self, chunk_size: int = 2_000_000) -> dict[str, dict]:
-        """Derive resolution prices from the last observed trade per market."""
+        """Derive final price per market from the last observed trade."""
         csv_path = self._data_dir / "processed" / "trades.csv"
         if not csv_path.exists():
             return {}
 
-        # Track last seen price and date per market across chunks
         last_seen: dict[str, dict] = {}
 
         progress = Progress(
@@ -294,32 +282,40 @@ class DataLoader:
                 total_rows += len(chunk)
                 progress.update(task, completed=total_rows)
 
-                market_col = "market_id" if "market_id" in chunk.columns else None
+                market_col = (
+                    "market_id" if "market_id" in chunk.columns
+                    else "condition_id" if "condition_id" in chunk.columns
+                    else None
+                )
                 if not market_col or "price" not in chunk.columns:
                     continue
 
-                # Get last row per market in this chunk
+                chunk = chunk.sort("timestamp")
                 last_per_market = chunk.group_by(market_col).agg([
                     pl.col("price").last().alias("final_price"),
-                    pl.col("timestamp").last().alias("last_date"),
+                    pl.col("timestamp").last().alias("last_ts"),
                 ])
 
                 for row in last_per_market.iter_rows(named=True):
                     mid = row[market_col]
+                    if not mid:
+                        continue
                     price = float(row["final_price"])
-                    last_seen[mid] = {
-                        "outcome": "Yes" if price > 0.5 else "No",
-                        "final_price": price,
-                        "resolution_date": str(row.get("last_date", "")),
-                    }
+                    last_ts_str = str(row.get("last_ts", ""))
+                    existing = last_seen.get(mid)
+                    if existing is None or last_ts_str > str(existing.get("resolution_date", "")):
+                        last_seen[mid] = {
+                            "outcome": "Yes" if price > 0.5 else "No",
+                            "final_price": price,
+                            "resolution_date": last_ts_str,
+                        }
 
         logger.info("Derived resolutions for %d markets", len(last_seen))
         return last_seen
 
     @staticmethod
     def _detect_category(question: str) -> str:
-        """Simple keyword-based category detection."""
-        q = question.lower()
+        q = (question or "").lower()
         if any(w in q for w in ["bitcoin", "btc", "eth", "crypto", "solana", "token"]):
             return "crypto"
         if any(w in q for w in ["trump", "biden", "election", "senate", "congress", "president", "governor"]):
@@ -331,19 +327,30 @@ class DataLoader:
         return "other"
 
     @staticmethod
-    def group_by_day(snapshots: list[MarketSnapshot]) -> dict[date, list[MarketSnapshot]]:
-        """Group snapshots by calendar day."""
-        by_day: dict[date, list[MarketSnapshot]] = defaultdict(list)
-        for snap in snapshots:
-            by_day[snap.timestamp.date()].append(snap)
-        return dict(by_day)
+    def group_by_hour(bars: list[HourlyBar]) -> dict[datetime, list[HourlyBar]]:
+        """Chronological bucketing of bars for the engine's main loop."""
+        by_hour: dict[datetime, list[HourlyBar]] = defaultdict(list)
+        for b in bars:
+            by_hour[b.hour].append(b)
+        return dict(by_hour)
 
-    @staticmethod
-    def aggregate_daily_markets(
-        snapshots: list[MarketSnapshot],
-    ) -> dict[str, MarketSnapshot]:
-        """Get the last snapshot per market for a given day."""
-        latest: dict[str, MarketSnapshot] = {}
-        for snap in sorted(snapshots, key=lambda s: s.timestamp):
-            latest[snap.polymarket_id] = snap
-        return latest
+
+def _parse_hour_bucket(hour_str: str) -> datetime | None:
+    """Parse a 'YYYY-MM-DDTHH' bucket string into a UTC datetime on the hour."""
+    if not hour_str or len(hour_str) < 13:
+        return None
+    try:
+        normalized = hour_str[:13].replace("T", " ")
+        return datetime.strptime(normalized, "%Y-%m-%d %H").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+
+
+def _parse_ts(ts: str | None) -> datetime | None:
+    """Parse an ISO timestamp, tolerating missing timezone."""
+    if not ts:
+        return None
+    try:
+        return datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+    except ValueError:
+        return None
