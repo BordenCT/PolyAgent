@@ -282,8 +282,12 @@ class DataIngester:
 
     # ── Stage 3: Process into trades ────────────────────────────────────
 
-    def process_trades(self) -> int:
-        """Process orderFilled events + markets into structured trades. Uses Polars."""
+    def process_trades(self, chunk_size: int = 5_000_000) -> int:
+        """Process orderFilled events + markets into structured trades.
+
+        Processes in chunks to handle datasets larger than available RAM.
+        A 37GB CSV with 86M+ rows needs chunked processing even with 48GB RAM.
+        """
         if not self.orders_csv.exists():
             raise FileNotFoundError(f"No order data at {self.orders_csv}")
         if not self.markets_csv.exists():
@@ -293,97 +297,121 @@ class DataIngester:
             SpinnerColumn(),
             TextColumn("{task.description}"),
             BarColumn(bar_width=40),
+            TextColumn("[green]{task.completed:,} rows"),
             TimeElapsedColumn(),
         )
         with progress:
-            task = progress.add_task("[cyan]Loading order events...", total=None)
-
-            orders = pl.scan_csv(
-                str(self.orders_csv),
-                schema_overrides={"takerAssetId": pl.Utf8, "makerAssetId": pl.Utf8},
-            ).collect(streaming=True)
-
-            orders = orders.with_columns(
-                pl.from_epoch(pl.col("timestamp"), time_unit="s").alias("timestamp")
-            )
-            progress.update(task, description=f"[green]Loaded {len(orders):,} order events")
-            progress.update(task, completed=1, total=1)
-
-            task2 = progress.add_task("[cyan]Loading markets...", total=None)
-            markets = pl.scan_csv(
+            # Markets are small (~20MB), load fully
+            task_m = progress.add_task("[cyan]Loading markets...", total=None)
+            markets = pl.read_csv(
                 str(self.markets_csv),
                 schema_overrides={"token1": pl.Utf8, "token2": pl.Utf8},
-            ).collect(streaming=True)
-            progress.update(task2, description=f"[green]Loaded {len(markets):,} markets")
-            progress.update(task2, completed=1, total=1)
+            )
+            progress.update(task_m, description=f"[green]Loaded {len(markets):,} markets")
+            progress.update(task_m, completed=1, total=1)
 
-            task3 = progress.add_task("[cyan]Processing trades...", total=None)
-
-            # Build long-form market-token mapping
+            # Build token -> market_id lookup (small, stays in memory)
             markets_long = (
                 markets.select(["id", "token1", "token2"])
                 .rename({"id": "market_id"})
-                .melt(id_vars="market_id", value_vars=["token1", "token2"], variable_name="side", value_name="asset_id")
+                .melt(id_vars="market_id", value_vars=["token1", "token2"],
+                      variable_name="side", value_name="asset_id")
             )
 
-            # Identify non-USDC asset per trade
-            orders = orders.with_columns(
-                pl.when(pl.col("makerAssetId") != "0")
-                .then(pl.col("makerAssetId"))
-                .otherwise(pl.col("takerAssetId"))
-                .alias("nonusdc_asset_id")
+            # Count total lines for progress (fast — just counts newlines)
+            task_count = progress.add_task("[cyan]Counting rows...", total=None)
+            total_rows = 0
+            with open(self.orders_csv, "rb") as f:
+                for buf in iter(lambda: f.read(1024 * 1024 * 64), b""):
+                    total_rows += buf.count(b"\n")
+            total_rows -= 1  # subtract header
+            progress.update(task_count, description=f"[green]{total_rows:,} rows to process")
+            progress.update(task_count, completed=1, total=1)
+
+            # Process in chunks using batched reader
+            task_proc = progress.add_task("[cyan]Processing trades...", total=total_rows)
+            reader = pl.read_csv_batched(
+                str(self.orders_csv),
+                batch_size=chunk_size,
+                schema_overrides={"takerAssetId": pl.Utf8, "makerAssetId": pl.Utf8},
             )
 
-            # Join to get market_id and side
-            orders = orders.join(markets_long, left_on="nonusdc_asset_id", right_on="asset_id", how="left")
+            total_trades = 0
+            first_write = True
 
-            # Label assets and compute price
-            orders = orders.with_columns([
-                pl.when(pl.col("makerAssetId") == "0").then(pl.lit("USDC")).otherwise(pl.col("side")).alias("makerAsset"),
-                pl.when(pl.col("takerAssetId") == "0").then(pl.lit("USDC")).otherwise(pl.col("side")).alias("takerAsset"),
-            ])
+            while True:
+                batches = reader.next_batches(1)
+                if not batches:
+                    break
 
-            orders = orders.with_columns([
-                (pl.col("makerAmountFilled") / 10**6).alias("makerAmountFilled"),
-                (pl.col("takerAmountFilled") / 10**6).alias("takerAmountFilled"),
-            ])
+                chunk = batches[0]
 
-            orders = orders.with_columns([
-                pl.when(pl.col("takerAsset") == "USDC").then(pl.lit("BUY")).otherwise(pl.lit("SELL")).alias("taker_direction"),
-                pl.when(pl.col("takerAsset") == "USDC").then(pl.lit("SELL")).otherwise(pl.lit("BUY")).alias("maker_direction"),
-                pl.when(pl.col("takerAsset") == "USDC")
-                .then(pl.col("takerAmountFilled") / pl.col("makerAmountFilled"))
-                .otherwise(pl.col("makerAmountFilled") / pl.col("takerAmountFilled"))
-                .cast(pl.Float64)
-                .alias("price"),
-                pl.when(pl.col("takerAsset") == "USDC")
-                .then(pl.col("takerAmountFilled"))
-                .otherwise(pl.col("makerAmountFilled"))
-                .alias("usd_amount"),
-                pl.when(pl.col("takerAsset") != "USDC")
-                .then(pl.col("takerAmountFilled"))
-                .otherwise(pl.col("makerAmountFilled"))
-                .alias("token_amount"),
-                pl.when(pl.col("makerAsset") != "USDC")
-                .then(pl.col("makerAsset"))
-                .otherwise(pl.col("takerAsset"))
-                .alias("nonusdc_side"),
-            ])
+                # Transform this chunk
+                chunk = chunk.with_columns(
+                    pl.from_epoch(pl.col("timestamp"), time_unit="s").alias("timestamp")
+                )
 
-            trades = orders.select([
-                "timestamp", "market_id", "maker", "taker", "nonusdc_side",
-                "maker_direction", "taker_direction", "price", "usd_amount",
-                "token_amount", "transactionHash",
-            ])
+                chunk = chunk.with_columns(
+                    pl.when(pl.col("makerAssetId") != "0")
+                    .then(pl.col("makerAssetId"))
+                    .otherwise(pl.col("takerAssetId"))
+                    .alias("nonusdc_asset_id")
+                )
 
-            task4 = progress.add_task("[cyan]Writing trades CSV...", total=None)
-            trades.write_csv(str(self.trades_csv))
-            progress.update(task3, description=f"[green]Processed {len(trades):,} trades")
-            progress.update(task3, completed=1, total=1)
-            progress.update(task4, description=f"[green]Saved to {self.trades_csv}")
-            progress.update(task4, completed=1, total=1)
+                chunk = chunk.join(markets_long, left_on="nonusdc_asset_id", right_on="asset_id", how="left")
 
-        return len(trades)
+                chunk = chunk.with_columns([
+                    pl.when(pl.col("makerAssetId") == "0").then(pl.lit("USDC")).otherwise(pl.col("side")).alias("makerAsset"),
+                    pl.when(pl.col("takerAssetId") == "0").then(pl.lit("USDC")).otherwise(pl.col("side")).alias("takerAsset"),
+                ])
+
+                chunk = chunk.with_columns([
+                    (pl.col("makerAmountFilled") / 10**6).alias("makerAmountFilled"),
+                    (pl.col("takerAmountFilled") / 10**6).alias("takerAmountFilled"),
+                ])
+
+                chunk = chunk.with_columns([
+                    pl.when(pl.col("takerAsset") == "USDC").then(pl.lit("BUY")).otherwise(pl.lit("SELL")).alias("taker_direction"),
+                    pl.when(pl.col("takerAsset") == "USDC").then(pl.lit("SELL")).otherwise(pl.lit("BUY")).alias("maker_direction"),
+                    pl.when(pl.col("takerAsset") == "USDC")
+                    .then(pl.col("takerAmountFilled") / pl.col("makerAmountFilled"))
+                    .otherwise(pl.col("makerAmountFilled") / pl.col("takerAmountFilled"))
+                    .cast(pl.Float64)
+                    .alias("price"),
+                    pl.when(pl.col("takerAsset") == "USDC")
+                    .then(pl.col("takerAmountFilled"))
+                    .otherwise(pl.col("makerAmountFilled"))
+                    .alias("usd_amount"),
+                    pl.when(pl.col("takerAsset") != "USDC")
+                    .then(pl.col("takerAmountFilled"))
+                    .otherwise(pl.col("makerAmountFilled"))
+                    .alias("token_amount"),
+                    pl.when(pl.col("makerAsset") != "USDC")
+                    .then(pl.col("makerAsset"))
+                    .otherwise(pl.col("takerAsset"))
+                    .alias("nonusdc_side"),
+                ])
+
+                trades = chunk.select([
+                    "timestamp", "market_id", "maker", "taker", "nonusdc_side",
+                    "maker_direction", "taker_direction", "price", "usd_amount",
+                    "token_amount", "transactionHash",
+                ])
+
+                # Append to output file
+                if first_write:
+                    trades.write_csv(str(self.trades_csv))
+                    first_write = False
+                else:
+                    with open(self.trades_csv, "a") as f:
+                        trades.write_csv(f, include_header=False)
+
+                total_trades += len(trades)
+                progress.update(task_proc, completed=total_trades)
+
+            progress.update(task_proc, description=f"[green]Processed {total_trades:,} trades")
+
+        return total_trades
 
     # ── Helpers ──────────────────────────────────────────────────────────
 
