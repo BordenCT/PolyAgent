@@ -37,4 +37,4 @@ CREATE TABLE IF NOT EXISTS backtest_positions (
     market_price    DECIMAL NOT NULL
 );
 
-CREATE INDEX idx_backtest_positions_run_id ON backtest_positions(run_id);
+CREATE INDEX IF NOT EXISTS idx_backtest_positions_run_id ON backtest_positions(run_id);
