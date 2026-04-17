@@ -396,7 +396,7 @@ class DataIngester:
                     "timestamp", "market_id", "maker", "taker", "nonusdc_side",
                     "maker_direction", "taker_direction", "price", "usd_amount",
                     "token_amount", "transactionHash",
-                ])
+                ]).filter(pl.col("market_id").is_not_null())
 
                 # Append to output file
                 if first_write:
