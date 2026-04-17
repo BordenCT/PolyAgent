@@ -40,10 +40,9 @@ class TestSettings:
             assert s.scanner_workers is None
             assert s.brain_workers is None
 
-    def test_missing_api_key_raises(self):
+    def test_missing_api_key_defaults_empty(self):
+        """API key defaults to empty when using Ollama as provider."""
         with patch.dict(os.environ, {}, clear=True):
-            try:
-                Settings.from_env()
-                assert False, "Should raise"
-            except ValueError as e:
-                assert "ANTHROPIC_API_KEY" in str(e)
+            s = Settings.from_env()
+            assert s.anthropic_api_key == ""
+            assert s.llm_provider == "ollama"

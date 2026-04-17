@@ -1,43 +1,50 @@
-"""Brain service — 4-check market evaluation via Claude."""
+"""Brain service — 4-check market evaluation via LLM (Claude or Ollama)."""
 from __future__ import annotations
 
 import logging
+from typing import Protocol
 from uuid import UUID
 
-from polyagent.data.clients.claude import ClaudeClient
 from polyagent.models import Consensus, MarketData, Thesis, ThesisChecks
 from polyagent.services.embeddings import EmbeddingsService
 
 logger = logging.getLogger("polyagent.services.brain")
 
 
+class LLMEvaluator(Protocol):
+    """Interface for any LLM that can evaluate markets."""
+
+    def evaluate_market(
+        self,
+        question: str,
+        market_price: float,
+        rag_context: str,
+        whale_activity: str,
+    ) -> dict: ...
+
+
 class BrainService:
-    """Evaluates markets using Claude's 4-check analysis."""
+    """Evaluates markets using LLM 4-check analysis.
+
+    Supports both Claude and Ollama as the LLM backend via the LLMEvaluator protocol.
+    """
 
     def __init__(
         self,
-        claude_client: ClaudeClient,
+        llm_evaluator: LLMEvaluator,
         embeddings_service: EmbeddingsService,
         historical_repo,
         confidence_threshold: float = 0.75,
         min_checks: int = 3,
     ) -> None:
-        self._claude = claude_client
+        self._llm = llm_evaluator
         self._embeddings = embeddings_service
         self._historical_repo = historical_repo
         self._confidence_threshold = confidence_threshold
         self._min_checks = min_checks
 
     def evaluate(self, market: MarketData, market_db_id: UUID) -> Thesis | None:
-        """Run 4-check evaluation on a market. Returns Thesis or None if rejected.
-
-        Args:
-            market: Live market snapshot to evaluate.
-            market_db_id: Database UUID for the market record.
-
-        Returns:
-            A Thesis if the market passes all gates, or None if rejected.
-        """
+        """Run 4-check evaluation on a market. Returns Thesis or None if rejected."""
         # Build RAG context from similar historical outcomes
         embedding = self._embeddings.embed_text(market.question)
         similar = self._historical_repo.find_similar(embedding, limit=10)
@@ -46,8 +53,8 @@ class BrainService:
         # Get whale activity context
         whale_context = self._get_whale_context(market)
 
-        # Call Claude for full evaluation
-        result = self._claude.evaluate_market(
+        # Call LLM for full evaluation
+        result = self._llm.evaluate_market(
             question=market.question,
             market_price=float(market.midpoint_price),
             rag_context=rag_context,
@@ -101,14 +108,7 @@ class BrainService:
         return thesis
 
     def _format_rag_context(self, similar_outcomes: list[dict]) -> str:
-        """Format historical outcomes for Claude's context.
-
-        Args:
-            similar_outcomes: List of similar resolved market dicts.
-
-        Returns:
-            Formatted multi-line string for inclusion in the Claude prompt.
-        """
+        """Format historical outcomes for the LLM's context."""
         if not similar_outcomes:
             return "No similar historical markets found."
         lines = []
@@ -121,13 +121,5 @@ class BrainService:
         return "\n".join(lines)
 
     def _get_whale_context(self, market: MarketData) -> str:
-        """Check if target wallets are active in this market.
-
-        Args:
-            market: The market to check for whale activity.
-
-        Returns:
-            A summary string describing whale activity, or a placeholder for v1.
-        """
-        # For v1, return a placeholder — whale tracking requires on-chain data
+        """Check if target wallets are active in this market."""
         return "No whale activity data available for this market."

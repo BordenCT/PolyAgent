@@ -58,7 +58,10 @@ class Settings:
     voyage_api_key: str | None
     polymarket_api_url: str
 
-    # Ollama (local LLM for scanner estimates)
+    # LLM provider routing
+    llm_provider: str  # "claude", "ollama", or "hybrid" (ollama scanner + claude brain)
+
+    # Ollama (local LLM)
     ollama_url: str
     ollama_model: str
     ollama_enabled: bool
@@ -83,7 +86,7 @@ class Settings:
             min_depth=_env_float("MIN_DEPTH", 500.0),
             min_hours=_env_float("MIN_HOURS", 4.0),
             max_hours=_env_float("MAX_HOURS", 168.0),
-            anthropic_api_key=_env_str("ANTHROPIC_API_KEY"),
+            anthropic_api_key=_env_str("ANTHROPIC_API_KEY", ""),
             brain_confidence_threshold=_env_float("BRAIN_CONFIDENCE_THRESHOLD", 0.75),
             brain_min_checks=_env_int("BRAIN_MIN_CHECKS", 3),
             kelly_max_fraction=_env_float("KELLY_MAX_FRACTION", 0.25),
@@ -104,6 +107,7 @@ class Settings:
             polymarket_api_url=_env_str(
                 "POLYMARKET_API_URL", "https://clob.polymarket.com"
             ),
+            llm_provider=_env_str("LLM_PROVIDER", "ollama"),
             ollama_url=_env_str("OLLAMA_URL", "http://192.168.1.56:11434"),
             ollama_model=_env_str("OLLAMA_MODEL", "phi4:14b"),
             ollama_enabled=_env_bool("OLLAMA_ENABLED", True),

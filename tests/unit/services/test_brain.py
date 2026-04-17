@@ -15,7 +15,7 @@ class TestBrainService:
         self.embeddings = MagicMock()
         self.historical_repo = MagicMock()
         self.brain = BrainService(
-            claude_client=self.claude,
+            llm_evaluator=self.claude,
             embeddings_service=self.embeddings,
             historical_repo=self.historical_repo,
             confidence_threshold=0.75,

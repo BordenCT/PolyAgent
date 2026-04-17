@@ -44,18 +44,38 @@ def run() -> None:
 
     # Clients
     polymarket = PolymarketClient(base_url=settings.polymarket_api_url)
-    claude = ClaudeClient(api_key=settings.anthropic_api_key)
     embeddings = EmbeddingsService(api_key=settings.voyage_api_key)
 
-    # Local LLM for scanner estimates (zero cost)
+    # LLM provider routing
     ollama = None
-    if settings.ollama_enabled:
+    claude = None
+    if settings.llm_provider in ("ollama", "hybrid"):
         ollama = OllamaClient(base_url=settings.ollama_url, model=settings.ollama_model)
         if ollama.health_check():
             logger.info("Ollama connected: %s @ %s", settings.ollama_model, settings.ollama_url)
         else:
-            logger.warning("Ollama unreachable at %s — falling back to midpoint estimates", settings.ollama_url)
+            logger.warning("Ollama unreachable at %s", settings.ollama_url)
             ollama = None
+
+    if settings.llm_provider in ("claude", "hybrid") or (settings.llm_provider == "ollama" and not ollama):
+        if settings.anthropic_api_key:
+            claude = ClaudeClient(api_key=settings.anthropic_api_key)
+            logger.info("Claude client initialized")
+        elif settings.llm_provider == "claude":
+            raise ValueError("LLM_PROVIDER=claude but ANTHROPIC_API_KEY is not set")
+
+    # Select brain evaluator based on provider
+    if settings.llm_provider == "ollama" and ollama:
+        brain_evaluator = ollama
+        logger.info("Brain using: Ollama phi4:14b ($0)")
+    elif settings.llm_provider == "hybrid" and claude:
+        brain_evaluator = claude
+        logger.info("Brain using: Claude Sonnet (scanner uses Ollama)")
+    elif claude:
+        brain_evaluator = claude
+        logger.info("Brain using: Claude Sonnet")
+    else:
+        raise RuntimeError("No LLM available for brain evaluation")
 
     # Repositories
     market_repo = MarketRepository(db)
@@ -71,7 +91,7 @@ def run() -> None:
         max_hours=settings.max_hours,
     )
     brain = BrainService(
-        claude_client=claude,
+        llm_evaluator=brain_evaluator,
         embeddings_service=embeddings,
         historical_repo=historical_repo,
         confidence_threshold=settings.brain_confidence_threshold,
@@ -246,7 +266,8 @@ def run() -> None:
     finally:
         logger.info("Shutting down...")
         polymarket.close()
-        claude.close()
+        if claude:
+            claude.close()
         if ollama:
             ollama.close()
         db.close()

@@ -57,6 +57,88 @@ class OllamaClient:
             logger.warning("Ollama estimate failed: %s", e)
             return 0.5  # fallback to midpoint
 
+    def evaluate_market(
+        self,
+        question: str,
+        market_price: float,
+        rag_context: str,
+        whale_activity: str,
+    ) -> dict:
+        """Full 4-check market evaluation via Ollama. Matches ClaudeClient interface."""
+        prompt = (
+            "You are an expert prediction market analyst. Evaluate this market "
+            "and run 4 checks. Return ONLY valid JSON.\n\n"
+            "The 4 checks:\n"
+            "1. base_rate — Does historical data support this outcome?\n"
+            "2. news — Has anything changed recently that affects this market?\n"
+            "3. whale — Are high-performing wallets active in this market?\n"
+            "4. disposition — Is the crowd making a cognitive error?\n\n"
+            f"Question: {question}\n"
+            f"Current market price: {market_price:.4f}\n\n"
+            f"Historical Context:\n{rag_context}\n\n"
+            f"Whale Activity:\n{whale_activity}\n\n"
+            'Return ONLY JSON: {"base_rate": true/false, "news": true/false, '
+            '"whale": true/false, "disposition": true/false, '
+            '"probability": 0.XX, "confidence": 0.XX, '
+            '"thesis": "your 1-2 sentence thesis"}'
+        )
+
+        try:
+            resp = self._http.post(
+                "/api/generate",
+                json={
+                    "model": self._model,
+                    "prompt": prompt,
+                    "stream": False,
+                    "options": {"temperature": 0.1, "num_predict": 256},
+                },
+            )
+            resp.raise_for_status()
+            text = resp.json().get("response", "")
+            return self._parse_evaluation(text)
+        except (httpx.HTTPError, json.JSONDecodeError) as e:
+            logger.warning("Ollama evaluate_market failed: %s", e)
+            return {
+                "base_rate": False, "news": False, "whale": False,
+                "disposition": False, "probability": 0.5,
+                "confidence": 0.0, "thesis": "Evaluation failed",
+            }
+
+    def _parse_evaluation(self, text: str) -> dict:
+        """Parse a full 4-check evaluation response."""
+        defaults = {
+            "base_rate": False, "news": False, "whale": False,
+            "disposition": False, "probability": 0.5,
+            "confidence": 0.0, "thesis": "",
+        }
+        try:
+            data = json.loads(text)
+            for key in defaults:
+                if key in data:
+                    defaults[key] = data[key]
+            defaults["probability"] = max(0.0, min(1.0, float(defaults["probability"])))
+            defaults["confidence"] = max(0.0, min(1.0, float(defaults["confidence"])))
+            return defaults
+        except (json.JSONDecodeError, TypeError, ValueError):
+            pass
+
+        # Try extracting JSON from markdown code block
+        json_match = re.search(r"\{[^}]*\}", text, re.DOTALL)
+        if json_match:
+            try:
+                data = json.loads(json_match.group())
+                for key in defaults:
+                    if key in data:
+                        defaults[key] = data[key]
+                defaults["probability"] = max(0.0, min(1.0, float(defaults["probability"])))
+                defaults["confidence"] = max(0.0, min(1.0, float(defaults["confidence"])))
+                return defaults
+            except (json.JSONDecodeError, TypeError, ValueError):
+                pass
+
+        logger.warning("Could not parse evaluation from: %s", text[:200])
+        return defaults
+
     def estimate_batch(self, questions: list[dict[str, str]]) -> dict[str, float]:
         """Estimate probabilities for multiple markets.
 
