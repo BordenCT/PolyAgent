@@ -1,0 +1,40 @@
+services:
+  polyagent-app:
+    build:
+      context: .
+      containerfile: Containerfile
+    container_name: polyagent-app
+    env_file: .env
+    depends_on:
+      polyagent-db:
+        condition: service_healthy
+    networks:
+      - polyagent-net
+    restart: unless-stopped
+
+  polyagent-db:
+    image: docker.io/pgvector/pgvector:pg17
+    container_name: polyagent-db
+    environment:
+      POSTGRES_USER: polyagent
+      POSTGRES_PASSWORD: polyagent
+      POSTGRES_DB: polyagent
+    ports:
+      - "5432:5432"
+    volumes:
+      - polyagent-data:/var/lib/postgresql/data
+      - ./db/migrations:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U polyagent"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - polyagent-net
+
+volumes:
+  polyagent-data:
+
+networks:
+  polyagent-net:
+    driver: bridge

@@ -32,6 +32,7 @@ The bot runs in paper trading mode by default. A single config flag enables live
 - **Python 3.14** free-threaded build (`--disable-gil`) for true thread parallelism
 - **Rust** polymarket-cli as subprocess for supplemental market commands
 - **Podman** containerized: 2 containers (app + db)
+- **Ollama** (phi4:14b) on local LXC at `192.168.1.56` for scanner probability estimates (zero cost)
 
 ### Containers
 
@@ -209,7 +210,8 @@ polyagent/
 │   │   └── historical.py
 │   └── clients/                # External API clients
 │       ├── polymarket.py       # py-clob-client + CLI subprocess
-│       └── claude.py           # Anthropic SDK with prompt caching
+│       ├── claude.py           # Anthropic SDK with prompt caching
+│       └── ollama.py           # Local phi4:14b for scanner estimates
 ├── infra/                      # Infrastructure wiring
 │   ├── config.py               # Env vars, settings
 │   ├── database.py             # psycopg connection pool
@@ -217,7 +219,8 @@ polyagent/
 │   ├── queues.py               # Inter-thread queue definitions
 │   └── logging.py              # Structured JSON logging
 ├── scripts/
-│   ├── analyze_wallets.py      # One-time: poly_data -> target_wallets
+│   ├── ingest.py               # Data ingestion: snapshot download + trade processing
+│   ├── analyze_wallets.py      # One-time: ingested data -> target_wallets
 │   └── backfill_embeddings.py  # One-time: embed historical outcomes
 ├── main.py                     # Entry point
 ├── Containerfile
@@ -238,11 +241,11 @@ polyagent/
 
 ### Scanner: Market Scoring
 
-The article calls `claude_estimate(m)` for all 500 markets, but that's 500 API calls per cycle just for scanning. Instead, we use pgvector: embed the market question, retrieve similar resolved historical outcomes, and use their outcome distribution as the initial probability estimate. This eliminates Claude from the scan loop entirely — Claude is reserved for the brain's deep 4-check evaluation on survivors only.
+The article calls `claude_estimate(m)` for all 500 markets, but that's 500 API calls per cycle just for scanning. Instead, we use **phi4:14b on our local Ollama instance** (`192.168.1.56:11434`) to generate probability estimates for all 500 markets at zero cost. If Ollama is unreachable, falls back to pgvector similarity lookup against historical outcomes, then to market midpoint. Claude is reserved for the brain's deep 4-check evaluation on survivors only.
 
 ```python
 def score_market(market, historical_estimate):
-    # historical_estimate from pgvector similarity lookup
+    # historical_estimate from Ollama phi4:14b (or pgvector/midpoint fallback)
     gap = abs(historical_estimate - market.midpoint_price)
     depth = min(market.bids_depth, market.asks_depth)
     hours_left = market.hours_to_resolution
@@ -396,7 +399,18 @@ polyagent thesis <MARKET_ID>      # Full thesis + checks for a market
 
 ## Cost Estimates
 
-### Claude API (Sonnet 4)
+### Scanner: Ollama phi4:14b (Local)
+
+Scanner probability estimates run on the local Ollama LXC (`192.168.1.56:11434`) using phi4:14b. This handles all 500 market evaluations per cycle at **zero API cost**.
+
+| Component | Cost | Notes |
+|-----------|------|-------|
+| phi4:14b inference (500 markets/cycle) | $0 | Local LXC, no API charges |
+| Electricity / compute | Negligible | Already provisioned |
+
+### Brain: Claude API (Sonnet 4)
+
+Only the ~35 surviving markets reach Claude for deep 4-check evaluation.
 
 **Per market evaluation:**
 
@@ -411,20 +425,21 @@ polyagent thesis <MARKET_ID>      # Full thesis + checks for a market
 
 | Item | Cost |
 |------|------|
-| 35 market evaluations | $0.70 |
+| 35 brain evaluations (Claude Sonnet) | $0.70 |
 | Thesis dedup savings (~20% skip rate) | -$0.14 |
+| Scanner estimates (Ollama) | $0.00 |
 | **Net per cycle** | **~$0.56** |
 
 ### Scan Frequency Scenarios
 
-| Frequency | Cycles/Day | Claude $/Day | Claude $/Month |
-|-----------|-----------|-------------|---------------|
-| Every hour | 24 | $13.44 | ~$403 |
-| Every 4 hours | 6 | $3.36 | ~$101 |
-| Every 6 hours | 4 | $2.24 | ~$67 |
-| Daily (article's approach) | 1 | $0.56 | ~$17 |
+| Frequency | Cycles/Day | Scanner (Ollama) | Brain (Claude) $/Day | **Total $/Month** |
+|-----------|-----------|------------------|---------------------|-------------------|
+| Every hour | 24 | $0 | $13.44 | **~$403** |
+| Every 4 hours | 6 | $0 | $3.36 | **~$101** |
+| Every 6 hours | 4 | $0 | $2.24 | **~$67** |
+| Daily | 1 | $0 | $0.56 | **~$17** |
 
-**Recommended starting point:** Every 4 hours (6 cycles/day) — balances opportunity capture with cost. ~$101/month for Claude API.
+**Recommended starting point:** Every 4 hours (6 cycles/day). ~$101/month for Claude API. Scanner cost is $0 with Ollama.
 
 ### Embedding Costs (Voyage AI)
 
@@ -442,7 +457,7 @@ Voyage AI free tier covers 200M tokens/month. Our usage (~810K/month) is < 0.5% 
 |--------|-----------|-------------------|---------|
 | Market scan (500 markets) | ~1 MB | ~0.25 MB | ~6 MB |
 | Order books (35 survivors) | ~175 KB | ~44 KB | ~1 MB |
-| Historical poly_data | One-time: ~2-5 GB | — | — |
+| Historical data (`polyagent ingest`) | One-time: ~2-5 GB | — | — |
 | **DB growth** | ~2 MB | ~0.5 MB | ~12 MB |
 
 Monthly DB growth: ~360 MB (positions, theses, logs, embeddings).
@@ -452,20 +467,21 @@ Monthly DB growth: ~360 MB (positions, theses, logs, embeddings).
 | Resource | Cost |
 |----------|------|
 | MS-A2 (96-thread AMD) | Already provisioned |
+| Ollama LXC (phi4:14b) | Already provisioned (192.168.1.56) |
 | PostgreSQL 17 + pgvector | Runs on same machine (containerized) |
 | Polymarket API | Free (read-only, no auth) |
 | Voyage AI embeddings | Free tier |
 
 ### Total Monthly Cost Summary
 
-| Scan Frequency | Claude API | Embeddings | Infra | Total |
-|----------------|-----------|------------|-------|-------|
-| Hourly | ~$403 | $0 | $0* | **~$403/mo** |
-| Every 4 hours | ~$101 | $0 | $0* | **~$101/mo** |
-| Every 6 hours | ~$67 | $0 | $0* | **~$67/mo** |
-| Daily | ~$17 | $0 | $0* | **~$17/mo** |
+| Scan Frequency | Scanner (Ollama) | Brain (Claude) | Embeddings | **Total** |
+|----------------|-----------------|---------------|------------|-----------|
+| Hourly | $0 | ~$403 | $0 | **~$403/mo** |
+| Every 4 hours | $0 | ~$101 | $0 | **~$101/mo** |
+| Every 6 hours | $0 | ~$67 | $0 | **~$67/mo** |
+| Daily | $0 | ~$17 | $0 | **~$17/mo** |
 
-*Infrastructure already provisioned on MS-A2.
+All infrastructure already provisioned (MS-A2 + Ollama LXC).
 
 ---
 
@@ -514,6 +530,11 @@ DATABASE_URL=postgresql://polyagent:polyagent@polyagent-db:5432/polyagent
 # Embeddings
 VOYAGE_API_KEY=                     # Voyage AI key (optional, has free tier)
 
+# Ollama (local LLM for scanner estimates — zero cost)
+OLLAMA_ENABLED=true                 # Use Ollama for scanner probability estimates
+OLLAMA_URL=http://192.168.1.56:11434  # Ollama LXC address
+OLLAMA_MODEL=phi4:14b               # Model to use for estimates
+
 # Polymarket
 POLYMARKET_API_URL=https://clob.polymarket.com
 ```
@@ -535,7 +556,7 @@ Switching to live: set `PAPER_TRADE=false`, provide Polymarket wallet credential
 
 ## Backtest Engine
 
-Replays the full pipeline against historical poly_data to validate strategy performance before risking real capital.
+Replays the full pipeline against historical Polymarket data to validate strategy performance before risking real capital. Data is fetched via `polyagent ingest --snapshot` (no external repo dependency).
 
 ### Architecture
 
@@ -546,18 +567,18 @@ polyagent/
 ├── backtest/
 │   ├── __init__.py
 │   ├── engine.py           # BacktestEngine — drives the time-step loop
-│   ├── data_loader.py      # Loads poly_data CSVs into MarketData snapshots
+│   ├── data_loader.py      # Loads ingested CSVs into MarketData snapshots
 │   ├── estimator.py        # Pluggable probability estimators (historical, Claude, random)
 │   └── report.py           # Performance metrics and summary output
 ```
 
 ### How It Works
 
-1. **Load historical data** — `data_loader.py` reads poly_data CSVs (trades, markets, prices) and builds time-ordered snapshots. Each snapshot represents the market state at a point in time.
+1. **Load historical data** — `data_loader.py` reads ingested CSVs from `polyagent ingest` (trades, markets, prices) and builds time-ordered snapshots. Each snapshot represents the market state at a point in time.
 
 2. **Replay loop** — The engine iterates through time steps (configurable granularity: hourly, 4-hourly, daily). At each step:
    - Scanner scores all active markets against the estimator's probability
-   - Brain evaluation is pluggable: `HistoricalEstimator` (uses actual outcome as hindsight baseline), `CachedClaudeEstimator` (pre-computed Claude responses), or `LiveClaudeEstimator` (real API calls, ~$2-5 per full run)
+   - Brain evaluation is pluggable: `HistoricalEstimator` (hindsight baseline), `OllamaEstimator` (free local LLM), `CachedClaudeEstimator` (pre-computed Claude responses), or `LiveClaudeEstimator` (real API calls, ~$2-5 per full run)
    - Executor runs consensus + Kelly sizing
    - Exit monitor checks triggers using future price data from the next time steps
 
@@ -571,6 +592,7 @@ polyagent/
 |-----------|------|----------|
 | `HistoricalEstimator` | $0 | Uses actual resolution outcome as "perfect" estimate. Shows theoretical ceiling. |
 | `MidpointEstimator` | $0 | Uses market midpoint as estimate (sanity check — should produce ~0 P&L). |
+| `OllamaEstimator` | $0 | Uses local phi4:14b for LLM-powered estimates. Best free option for realistic backtests. |
 | `CachedClaudeEstimator` | ~$2-5 once | Run Claude against historical markets once, cache responses, replay free. |
 | `LiveClaudeEstimator` | ~$2-5/run | Full-fidelity: calls Claude API for each market evaluation. |
 
@@ -578,6 +600,7 @@ polyagent/
 
 ```
 polyagent backtest --start 2025-01-01 --end 2026-04-01  # Run backtest with defaults
+polyagent backtest --estimator ollama                    # Free LLM estimates via local phi4:14b
 polyagent backtest --estimator cached-claude             # Use pre-cached Claude estimates
 polyagent backtest --bankroll 1000 --kelly-max 0.15      # Override parameters
 polyagent backtest --report                              # Show results of last run
@@ -634,16 +657,16 @@ CREATE TABLE backtest_runs (
 
 ### Cost Optimization Note
 
-The original hourly cost estimate of ~$403/mo assumed Sonnet 4 for every evaluation. Revised approach:
+The original article's approach would cost ~$403/mo at hourly frequency using Claude for everything. Our optimizations:
 
 | Optimization | Savings |
 |-------------|---------|
-| Use Haiku 4.5 for scanner probability estimates | ~80% on scanner calls |
+| Ollama phi4:14b for scanner estimates (500 markets/cycle) | 100% — scanner cost is now $0 |
 | Thesis dedup via pgvector (skip similar markets) | ~20-30% on brain calls |
 | Tighter kill filters (fewer markets reach brain) | ~40% on brain calls |
-| **Combined** | **~$40-60/mo at hourly frequency** |
+| **Claude only used for brain** | **Only 35 evaluations/cycle reach Claude** |
 
-Backtesting with `CachedClaudeEstimator` costs ~$2-5 one-time to build the cache, then $0 per replay.
+Backtesting with `OllamaEstimator` is completely free. `CachedClaudeEstimator` costs ~$2-5 one-time to build the cache, then $0 per replay.
 
 ---
 
