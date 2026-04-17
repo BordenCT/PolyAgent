@@ -141,6 +141,7 @@ class BacktestEngine:
         start_date: date,
         end_date: date,
         bankroll: float = 800.0,
+        market_metadata: dict[str, dict] | None = None,
     ) -> BacktestResult:
         """Run a full backtest over the given data."""
         by_day = DataLoader.group_by_day(snapshots)
@@ -164,7 +165,7 @@ class BacktestEngine:
             task = progress.add_task("backtest", total=len(sorted_days), trades=0)
             for day in sorted_days:
                 day_snapshots = by_day[day]
-                day_trades = self.process_day(day_snapshots, resolutions, day)
+                day_trades = self.process_day(day_snapshots, resolutions, day, market_metadata or {})
                 all_trades.extend(day_trades)
                 progress.update(task, advance=1, trades=len(all_trades))
 
@@ -186,21 +187,42 @@ class BacktestEngine:
         snapshots: list[MarketSnapshot],
         resolutions: dict[str, dict],
         current_date: date,
+        market_metadata: dict[str, dict] | None = None,
     ) -> list[dict]:
         """Process one day of market data. Returns list of completed trade dicts."""
         daily_markets = DataLoader.aggregate_daily_markets(snapshots)
+        metadata = market_metadata or {}
         trades = []
 
         for market_id, snapshot in daily_markets.items():
             resolution = resolutions.get(market_id, {})
+            final_price_raw = resolution.get("final_price")
+
+            # Skip markets with no resolution data — can't evaluate P&L
+            if final_price_raw is None:
+                continue
+
+            final_price = float(final_price_raw)
+            entry_price = float(snapshot.price)
+
+            # Skip if entry and final are the same — no signal
+            if abs(final_price - entry_price) < 0.001:
+                continue
+
+            # Enrich with metadata
+            meta = metadata.get(market_id, {})
+            category = meta.get("category", snapshot.category)
+            question = meta.get("question", snapshot.question)
+
             market = snapshot.to_market_data(hours_to_resolution=48.0)
 
             # Get probability estimate
             estimate = self._estimator.estimate(
                 market_id,
                 outcome=resolution.get("outcome"),
-                final_price=resolution.get("final_price"),
-                market_price=float(snapshot.price),
+                final_price=final_price,
+                market_price=entry_price,
+                question=question,
             )
 
             # Run scanner
@@ -232,41 +254,38 @@ class BacktestEngine:
             if position is None:
                 continue
 
-            # Simulate exit using resolution data
-            final_price = Decimal(str(resolution.get("final_price", float(snapshot.price))))
-            exit_reason = self._exit_monitor.check_exit(
-                entry_price=snapshot.price,
-                target_price=position.target_price,
-                current_price=final_price,
-                volume_10min=0,
-                avg_volume_10min=1,
-                hours_since_entry=48.0,
-            )
-            if exit_reason is None:
-                exit_reason_str = "HELD_TO_RESOLUTION"
+            # Simulate exit — compare entry to final resolution price
+            exit_price_dec = Decimal(str(round(final_price, 6)))
+            target_price = float(position.target_price)
+
+            # Determine exit reason based on where final price landed
+            if entry_price < final_price and final_price >= target_price:
+                exit_reason_str = "TARGET_HIT"
+            elif entry_price < final_price:
+                exit_reason_str = "PARTIAL_PROFIT"
             else:
-                exit_reason_str = exit_reason.value
+                exit_reason_str = "LOSS"
 
             pnl = float(self._exit_monitor.calculate_pnl(
                 entry_price=snapshot.price,
-                exit_price=final_price,
+                exit_price=exit_price_dec,
                 position_size=position.position_size,
                 side=position.side.value,
             ))
 
             trades.append({
                 "polymarket_id": market_id,
-                "question": snapshot.question,
-                "category": snapshot.category,
-                "entry_price": float(snapshot.price),
-                "exit_price": float(final_price),
+                "question": question,
+                "category": category,
+                "entry_price": entry_price,
+                "exit_price": final_price,
                 "position_size": float(position.position_size),
                 "kelly_fraction": position.kelly_fraction,
                 "pnl": pnl,
                 "exit_reason": exit_reason_str,
                 "entry_date": str(current_date),
                 "estimator_prob": estimate,
-                "market_price": float(snapshot.price),
+                "market_price": entry_price,
             })
 
         return trades

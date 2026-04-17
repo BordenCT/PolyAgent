@@ -99,14 +99,15 @@ def backtest(start, end, estimator, bankroll, kelly_max, data_dir, show_report, 
         snapshots = loader.load_trades(start_date=start_date, end_date=end_date)
     except FileNotFoundError as e:
         console.print(f"[red]Error: {e}[/red]")
-        console.print("[dim]Clone poly_data first: git clone https://github.com/warproxxx/poly_data[/dim]")
+        console.print("[dim]Run 'polyagent ingest --snapshot' first to download historical data[/dim]")
         return
 
     resolutions = loader.load_resolutions()
+    market_metadata = loader.load_market_metadata()
 
     console.print(
         f"[cyan]Running backtest: {start_date} to {end_date} "
-        f"({len(snapshots)} snapshots, estimator={estimator})[/cyan]"
+        f"({len(snapshots)} snapshots, {len(resolutions):,} resolutions, estimator={estimator})[/cyan]"
     )
 
     engine = BacktestEngine(
@@ -122,6 +123,7 @@ def backtest(start, end, estimator, bankroll, kelly_max, data_dir, show_report, 
         start_date=start_date,
         end_date=end_date,
         bankroll=effective_bankroll,
+        market_metadata=market_metadata,
     )
 
     print_report(result, console)
@@ -139,6 +141,7 @@ def _run_comparison(console, settings, data_dir, start_date, end_date, bankroll,
         return
 
     resolutions = loader.load_resolutions()
+    market_metadata = loader.load_market_metadata()
 
     scanner = ScannerService(
         min_gap=settings.min_gap, min_depth=settings.min_depth,
@@ -161,7 +164,7 @@ def _run_comparison(console, settings, data_dir, start_date, end_date, bankroll,
     for name, cls in ESTIMATORS.items():
         console.print(f"[dim]Running {name}...[/dim]")
         engine = BacktestEngine(scanner=scanner, executor=executor, exit_monitor=exit_monitor, estimator=cls())
-        result = engine.run(snapshots, resolutions, start_date, end_date, bankroll)
+        result = engine.run(snapshots, resolutions, start_date, end_date, bankroll, market_metadata)
         pnl_style = "green" if result.total_pnl >= 0 else "red"
         table.add_row(
             name, str(result.total_trades), f"{result.win_rate:.1f}%",

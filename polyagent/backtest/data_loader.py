@@ -208,21 +208,120 @@ class DataLoader:
         logger.info("Produced %d market snapshots from %d rows", len(snapshots), total_rows)
         return snapshots
 
-    def load_resolutions(self) -> dict[str, dict]:
-        """Load market resolution outcomes."""
-        res_path = self._data_dir / "processed" / "resolutions.csv"
-        if not res_path.exists():
+    def load_market_metadata(self) -> dict[str, dict]:
+        """Load market questions and categories from markets.csv.
+
+        Returns dict mapping market_id -> {question, category}.
+        """
+        markets_path = self._data_dir / "markets.csv"
+        if not markets_path.exists():
+            logger.warning("No markets.csv found at %s", markets_path)
             return {}
 
-        df = pl.read_csv(str(res_path))
-        resolutions = {}
+        df = pl.read_csv(
+            str(markets_path),
+            schema_overrides={"token1": pl.Utf8, "token2": pl.Utf8},
+        )
+        metadata = {}
         for row in df.iter_rows(named=True):
-            resolutions[row.get("condition_id", "")] = {
-                "outcome": row.get("outcome"),
-                "final_price": float(row.get("final_price", 0)),
-                "resolution_date": row.get("resolution_date"),
-            }
-        return resolutions
+            market_id = row.get("id", "")
+            if market_id:
+                metadata[market_id] = {
+                    "question": row.get("question", ""),
+                    "category": self._detect_category(row.get("question", "")),
+                }
+        logger.info("Loaded metadata for %d markets", len(metadata))
+        return metadata
+
+    def load_resolutions(self) -> dict[str, dict]:
+        """Load or derive market resolution data.
+
+        First tries resolutions.csv. If not found, derives resolutions
+        from the trades data — the last traded price per market is used
+        as the final price.
+        """
+        # Try explicit resolutions file first
+        res_path = self._data_dir / "processed" / "resolutions.csv"
+        if res_path.exists():
+            df = pl.read_csv(str(res_path))
+            resolutions = {}
+            for row in df.iter_rows(named=True):
+                resolutions[row.get("condition_id", "")] = {
+                    "outcome": row.get("outcome"),
+                    "final_price": float(row.get("final_price", 0)),
+                    "resolution_date": row.get("resolution_date"),
+                }
+            return resolutions
+
+        # Derive from trades — last price per market
+        logger.info("No resolutions.csv found, deriving from trades data...")
+        return self._derive_resolutions()
+
+    def _derive_resolutions(self, chunk_size: int = 2_000_000) -> dict[str, dict]:
+        """Derive resolution prices from the last observed trade per market."""
+        csv_path = self._data_dir / "processed" / "trades.csv"
+        if not csv_path.exists():
+            return {}
+
+        # Track last seen price and date per market across chunks
+        last_seen: dict[str, dict] = {}
+
+        progress = Progress(
+            SpinnerColumn(),
+            TextColumn("[cyan]Deriving resolutions..."),
+            BarColumn(bar_width=40),
+            TextColumn("[green]{task.completed:,} rows"),
+            TimeElapsedColumn(),
+        )
+        with progress:
+            task = progress.add_task("resolutions", total=None)
+            total_rows = 0
+
+            reader = pl.read_csv_batched(str(csv_path), batch_size=chunk_size)
+            while True:
+                batches = reader.next_batches(1)
+                if not batches:
+                    break
+
+                chunk = batches[0]
+                total_rows += len(chunk)
+                progress.update(task, completed=total_rows)
+
+                market_col = "market_id" if "market_id" in chunk.columns else None
+                if not market_col or "price" not in chunk.columns:
+                    continue
+
+                # Get last row per market in this chunk
+                last_per_market = chunk.group_by(market_col).agg([
+                    pl.col("price").last().alias("final_price"),
+                    pl.col("timestamp").last().alias("last_date"),
+                ])
+
+                for row in last_per_market.iter_rows(named=True):
+                    mid = row[market_col]
+                    price = float(row["final_price"])
+                    last_seen[mid] = {
+                        "outcome": "Yes" if price > 0.5 else "No",
+                        "final_price": price,
+                        "resolution_date": str(row.get("last_date", "")),
+                    }
+
+        logger.info("Derived resolutions for %d markets", len(last_seen))
+        return last_seen
+
+    @staticmethod
+    def _detect_category(question: str) -> str:
+        """Simple keyword-based category detection."""
+        q = question.lower()
+        if any(w in q for w in ["bitcoin", "btc", "eth", "crypto", "solana", "token"]):
+            return "crypto"
+        if any(w in q for w in ["trump", "biden", "election", "senate", "congress", "president", "governor"]):
+            return "politics"
+        if any(w in q for w in ["fed", "rate", "inflation", "gdp", "economy", "recession"]):
+            return "macro"
+        if any(w in q for w in ["nfl", "nba", "mlb", "soccer", "game", "match", "championship"]):
+            return "sports"
+        return "other"
 
     @staticmethod
     def group_by_day(snapshots: list[MarketSnapshot]) -> dict[date, list[MarketSnapshot]]:
