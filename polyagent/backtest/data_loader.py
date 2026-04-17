@@ -211,6 +211,7 @@ class DataLoader:
     def load_market_metadata(self) -> dict[str, dict]:
         """Load market questions and categories from markets.csv.
 
+        Keys by both `id` and `condition_id` since trades may reference either.
         Returns dict mapping market_id -> {question, category}.
         """
         markets_path = self._data_dir / "markets.csv"
@@ -224,13 +225,19 @@ class DataLoader:
         )
         metadata = {}
         for row in df.iter_rows(named=True):
+            question = row.get("question", "")
+            category = self._detect_category(question)
+            entry = {"question": question, "category": category}
+
+            # Key by both id and condition_id for lookup flexibility
             market_id = row.get("id", "")
+            condition_id = row.get("condition_id", "")
             if market_id:
-                metadata[market_id] = {
-                    "question": row.get("question", ""),
-                    "category": self._detect_category(row.get("question", "")),
-                }
-        logger.info("Loaded metadata for %d markets", len(metadata))
+                metadata[market_id] = entry
+            if condition_id and condition_id != market_id:
+                metadata[condition_id] = entry
+
+        logger.info("Loaded metadata for %d markets (%d keys)", len(df), len(metadata))
         return metadata
 
     def load_resolutions(self) -> dict[str, dict]:

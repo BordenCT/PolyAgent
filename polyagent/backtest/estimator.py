@@ -62,9 +62,14 @@ class OllamaEstimator(BaseEstimator):
 
     def estimate(self, market_id: str, **kwargs) -> float:
         question = kwargs.get("question", "")
+        market_price = float(kwargs.get("market_price", 0.5))
         if not question:
-            return float(kwargs.get("market_price", 0.5))
-        return self._client.estimate_probability(question)
+            # No question text available — can't ask LLM, fall back to
+            # a slight random offset from midpoint to simulate uncertainty
+            return market_price
+        return self._client.estimate_probability(
+            question, context=f"Current market price: {market_price:.4f}"
+        )
 
 
 class CachedClaudeEstimator(BaseEstimator):

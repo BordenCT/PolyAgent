@@ -105,9 +105,13 @@ def backtest(start, end, estimator, bankroll, kelly_max, data_dir, show_report, 
     resolutions = loader.load_resolutions()
     market_metadata = loader.load_market_metadata()
 
+    # Check metadata coverage
+    resolution_ids = set(resolutions.keys())
+    matched = resolution_ids & set(market_metadata.keys())
     console.print(
         f"[cyan]Running backtest: {start_date} to {end_date} "
-        f"({len(snapshots)} snapshots, {len(resolutions):,} resolutions, estimator={estimator})[/cyan]"
+        f"({len(snapshots)} snapshots, {len(resolutions):,} resolutions, "
+        f"{len(matched)}/{len(resolution_ids)} with metadata, estimator={estimator})[/cyan]"
     )
 
     engine = BacktestEngine(
