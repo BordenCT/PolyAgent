@@ -18,6 +18,16 @@ from pathlib import Path
 
 import httpx
 import polars as pl
+from rich.progress import (
+    BarColumn,
+    DownloadColumn,
+    Progress,
+    SpinnerColumn,
+    TextColumn,
+    TimeElapsedColumn,
+    TimeRemainingColumn,
+    TransferSpeedColumn,
+)
 
 logger = logging.getLogger("polyagent.scripts.ingest")
 
@@ -76,13 +86,20 @@ class DataIngester:
         mode = "a" if offset > 0 else "w"
         total_new = 0
 
-        with open(self.markets_csv, mode, newline="") as f:
+        progress = Progress(
+            SpinnerColumn(),
+            TextColumn("[cyan]Fetching markets"),
+            BarColumn(bar_width=40),
+            TextColumn("[green]{task.completed:,} fetched"),
+            TimeElapsedColumn(),
+        )
+        with progress, open(self.markets_csv, mode, newline="") as f:
             writer = csv.writer(f)
             if mode == "w":
                 writer.writerow(MARKET_HEADERS)
 
+            task = progress.add_task("markets", total=None)
             while True:
-                logger.info("Fetching markets at offset %d...", offset)
                 try:
                     resp = self._http.get(
                         GAMMA_API_URL,
@@ -111,6 +128,7 @@ class DataIngester:
                         total_new += 1
 
                 offset += len(markets)
+                progress.update(task, completed=offset)
                 if len(markets) < batch_size:
                     break
 
@@ -166,22 +184,24 @@ class DataIngester:
             with httpx.stream("GET", SNAPSHOT_URL, follow_redirects=True, timeout=600.0) as resp:
                 resp.raise_for_status()
                 total = int(resp.headers.get("content-length", 0))
-                downloaded = 0
 
-                # Stream download → decompress xz → write CSV in one pass
+                progress = Progress(
+                    SpinnerColumn(),
+                    TextColumn("[cyan]Downloading snapshot"),
+                    BarColumn(bar_width=40),
+                    DownloadColumn(),
+                    TransferSpeedColumn(),
+                    TimeRemainingColumn(),
+                )
                 decompressor = lzma.LZMADecompressor()
-                with open(target, "wb") as f:
+                with progress, open(target, "wb") as f:
+                    task = progress.add_task("download", total=total or None)
                     for chunk in resp.iter_bytes(chunk_size=1024 * 256):
-                        downloaded += len(chunk)
+                        progress.advance(task, len(chunk))
                         try:
                             f.write(decompressor.decompress(chunk))
                         except lzma.LZMAError:
-                            # Final chunk may have trailing data
                             break
-
-                        if total > 0 and downloaded % (50 * 1024 * 1024) < (256 * 1024):
-                            pct = downloaded / total * 100
-                            logger.info("Download: %.0f%% (%d MB / %d MB)", pct, downloaded // (1024 * 1024), total // (1024 * 1024))
 
             logger.info("Snapshot ready: %s", target)
             return True
@@ -218,38 +238,44 @@ class DataIngester:
             }}
         }}"""
 
-        while True:
-            query = query_template.format(batch_size=batch_size, ts=last_timestamp)
-            try:
-                resp = self._http.post(GOLDSKY_URL, json={"query": query})
-                resp.raise_for_status()
-                events = resp.json().get("data", {}).get("orderFilledEvents", [])
-            except (httpx.HTTPError, json.JSONDecodeError) as e:
-                logger.warning("Goldsky error: %s, retrying in 5s", e)
-                time.sleep(5)
-                continue
+        progress = Progress(
+            SpinnerColumn(),
+            TextColumn("[cyan]Scraping Goldsky"),
+            BarColumn(bar_width=40),
+            TextColumn("[green]{task.completed:,} events"),
+            TimeElapsedColumn(),
+        )
+        with progress:
+            task = progress.add_task("goldsky", total=None)
+            while True:
+                query = query_template.format(batch_size=batch_size, ts=last_timestamp)
+                try:
+                    resp = self._http.post(GOLDSKY_URL, json={"query": query})
+                    resp.raise_for_status()
+                    events = resp.json().get("data", {}).get("orderFilledEvents", [])
+                except (httpx.HTTPError, json.JSONDecodeError) as e:
+                    logger.warning("Goldsky error: %s, retrying in 5s", e)
+                    time.sleep(5)
+                    continue
 
-            if not events:
-                break
+                if not events:
+                    break
 
-            # Append to CSV
-            file_exists = self.orders_csv.exists()
-            with open(self.orders_csv, "a", newline="") as f:
-                writer = csv.writer(f)
-                if not file_exists:
-                    writer.writerow(ORDER_COLUMNS)
-                for e in events:
-                    writer.writerow([e.get(c, "") for c in ORDER_COLUMNS])
+                # Append to CSV
+                file_exists = self.orders_csv.exists()
+                with open(self.orders_csv, "a", newline="") as f:
+                    writer = csv.writer(f)
+                    if not file_exists:
+                        writer.writerow(ORDER_COLUMNS)
+                    for e in events:
+                        writer.writerow([e.get(c, "") for c in ORDER_COLUMNS])
 
-            last_timestamp = int(events[-1]["timestamp"])
-            total += len(events)
+                last_timestamp = int(events[-1]["timestamp"])
+                total += len(events)
+                progress.update(task, completed=total)
 
-            if total % 10000 == 0:
-                ts_readable = datetime.fromtimestamp(last_timestamp, tz=timezone.utc).strftime("%Y-%m-%d %H:%M")
-                logger.info("Goldsky: %d events scraped (at %s)", total, ts_readable)
-
-            if len(events) < batch_size:
-                break
+                if len(events) < batch_size:
+                    break
 
         logger.info("Goldsky scrape complete: %d new events", total)
         return total
@@ -263,82 +289,100 @@ class DataIngester:
         if not self.markets_csv.exists():
             raise FileNotFoundError(f"No market data at {self.markets_csv}")
 
-        logger.info("Loading order events...")
-        orders = pl.scan_csv(
-            str(self.orders_csv),
-            schema_overrides={"takerAssetId": pl.Utf8, "makerAssetId": pl.Utf8},
-        ).collect(streaming=True)
-
-        orders = orders.with_columns(
-            pl.from_epoch(pl.col("timestamp"), time_unit="s").alias("timestamp")
+        progress = Progress(
+            SpinnerColumn(),
+            TextColumn("{task.description}"),
+            BarColumn(bar_width=40),
+            TimeElapsedColumn(),
         )
-        logger.info("Loaded %d order events", len(orders))
+        with progress:
+            task = progress.add_task("[cyan]Loading order events...", total=None)
 
-        logger.info("Loading markets...")
-        markets = pl.scan_csv(
-            str(self.markets_csv),
-            schema_overrides={"token1": pl.Utf8, "token2": pl.Utf8},
-        ).collect(streaming=True)
+            orders = pl.scan_csv(
+                str(self.orders_csv),
+                schema_overrides={"takerAssetId": pl.Utf8, "makerAssetId": pl.Utf8},
+            ).collect(streaming=True)
 
-        # Build long-form market-token mapping
-        markets_long = (
-            markets.select(["id", "token1", "token2"])
-            .rename({"id": "market_id"})
-            .melt(id_vars="market_id", value_vars=["token1", "token2"], variable_name="side", value_name="asset_id")
-        )
+            orders = orders.with_columns(
+                pl.from_epoch(pl.col("timestamp"), time_unit="s").alias("timestamp")
+            )
+            progress.update(task, description=f"[green]Loaded {len(orders):,} order events")
+            progress.update(task, completed=1, total=1)
 
-        # Identify non-USDC asset per trade
-        orders = orders.with_columns(
-            pl.when(pl.col("makerAssetId") != "0")
-            .then(pl.col("makerAssetId"))
-            .otherwise(pl.col("takerAssetId"))
-            .alias("nonusdc_asset_id")
-        )
+            task2 = progress.add_task("[cyan]Loading markets...", total=None)
+            markets = pl.scan_csv(
+                str(self.markets_csv),
+                schema_overrides={"token1": pl.Utf8, "token2": pl.Utf8},
+            ).collect(streaming=True)
+            progress.update(task2, description=f"[green]Loaded {len(markets):,} markets")
+            progress.update(task2, completed=1, total=1)
 
-        # Join to get market_id and side
-        orders = orders.join(markets_long, left_on="nonusdc_asset_id", right_on="asset_id", how="left")
+            task3 = progress.add_task("[cyan]Processing trades...", total=None)
 
-        # Label assets and compute price
-        orders = orders.with_columns([
-            pl.when(pl.col("makerAssetId") == "0").then(pl.lit("USDC")).otherwise(pl.col("side")).alias("makerAsset"),
-            pl.when(pl.col("takerAssetId") == "0").then(pl.lit("USDC")).otherwise(pl.col("side")).alias("takerAsset"),
-        ])
+            # Build long-form market-token mapping
+            markets_long = (
+                markets.select(["id", "token1", "token2"])
+                .rename({"id": "market_id"})
+                .melt(id_vars="market_id", value_vars=["token1", "token2"], variable_name="side", value_name="asset_id")
+            )
 
-        orders = orders.with_columns([
-            (pl.col("makerAmountFilled") / 10**6).alias("makerAmountFilled"),
-            (pl.col("takerAmountFilled") / 10**6).alias("takerAmountFilled"),
-        ])
+            # Identify non-USDC asset per trade
+            orders = orders.with_columns(
+                pl.when(pl.col("makerAssetId") != "0")
+                .then(pl.col("makerAssetId"))
+                .otherwise(pl.col("takerAssetId"))
+                .alias("nonusdc_asset_id")
+            )
 
-        orders = orders.with_columns([
-            pl.when(pl.col("takerAsset") == "USDC").then(pl.lit("BUY")).otherwise(pl.lit("SELL")).alias("taker_direction"),
-            pl.when(pl.col("takerAsset") == "USDC").then(pl.lit("SELL")).otherwise(pl.lit("BUY")).alias("maker_direction"),
-            pl.when(pl.col("takerAsset") == "USDC")
-            .then(pl.col("takerAmountFilled") / pl.col("makerAmountFilled"))
-            .otherwise(pl.col("makerAmountFilled") / pl.col("takerAmountFilled"))
-            .cast(pl.Float64)
-            .alias("price"),
-            pl.when(pl.col("takerAsset") == "USDC")
-            .then(pl.col("takerAmountFilled"))
-            .otherwise(pl.col("makerAmountFilled"))
-            .alias("usd_amount"),
-            pl.when(pl.col("takerAsset") != "USDC")
-            .then(pl.col("takerAmountFilled"))
-            .otherwise(pl.col("makerAmountFilled"))
-            .alias("token_amount"),
-            pl.when(pl.col("makerAsset") != "USDC")
-            .then(pl.col("makerAsset"))
-            .otherwise(pl.col("takerAsset"))
-            .alias("nonusdc_side"),
-        ])
+            # Join to get market_id and side
+            orders = orders.join(markets_long, left_on="nonusdc_asset_id", right_on="asset_id", how="left")
 
-        trades = orders.select([
-            "timestamp", "market_id", "maker", "taker", "nonusdc_side",
-            "maker_direction", "taker_direction", "price", "usd_amount",
-            "token_amount", "transactionHash",
-        ])
+            # Label assets and compute price
+            orders = orders.with_columns([
+                pl.when(pl.col("makerAssetId") == "0").then(pl.lit("USDC")).otherwise(pl.col("side")).alias("makerAsset"),
+                pl.when(pl.col("takerAssetId") == "0").then(pl.lit("USDC")).otherwise(pl.col("side")).alias("takerAsset"),
+            ])
 
-        trades.write_csv(str(self.trades_csv))
-        logger.info("Processed %d trades -> %s", len(trades), self.trades_csv)
+            orders = orders.with_columns([
+                (pl.col("makerAmountFilled") / 10**6).alias("makerAmountFilled"),
+                (pl.col("takerAmountFilled") / 10**6).alias("takerAmountFilled"),
+            ])
+
+            orders = orders.with_columns([
+                pl.when(pl.col("takerAsset") == "USDC").then(pl.lit("BUY")).otherwise(pl.lit("SELL")).alias("taker_direction"),
+                pl.when(pl.col("takerAsset") == "USDC").then(pl.lit("SELL")).otherwise(pl.lit("BUY")).alias("maker_direction"),
+                pl.when(pl.col("takerAsset") == "USDC")
+                .then(pl.col("takerAmountFilled") / pl.col("makerAmountFilled"))
+                .otherwise(pl.col("makerAmountFilled") / pl.col("takerAmountFilled"))
+                .cast(pl.Float64)
+                .alias("price"),
+                pl.when(pl.col("takerAsset") == "USDC")
+                .then(pl.col("takerAmountFilled"))
+                .otherwise(pl.col("makerAmountFilled"))
+                .alias("usd_amount"),
+                pl.when(pl.col("takerAsset") != "USDC")
+                .then(pl.col("takerAmountFilled"))
+                .otherwise(pl.col("makerAmountFilled"))
+                .alias("token_amount"),
+                pl.when(pl.col("makerAsset") != "USDC")
+                .then(pl.col("makerAsset"))
+                .otherwise(pl.col("takerAsset"))
+                .alias("nonusdc_side"),
+            ])
+
+            trades = orders.select([
+                "timestamp", "market_id", "maker", "taker", "nonusdc_side",
+                "maker_direction", "taker_direction", "price", "usd_amount",
+                "token_amount", "transactionHash",
+            ])
+
+            task4 = progress.add_task("[cyan]Writing trades CSV...", total=None)
+            trades.write_csv(str(self.trades_csv))
+            progress.update(task3, description=f"[green]Processed {len(trades):,} trades")
+            progress.update(task3, completed=1, total=1)
+            progress.update(task4, description=f"[green]Saved to {self.trades_csv}")
+            progress.update(task4, completed=1, total=1)
+
         return len(trades)
 
     # ── Helpers ──────────────────────────────────────────────────────────

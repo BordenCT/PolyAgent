@@ -6,6 +6,8 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from decimal import Decimal
 
+from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
+
 from polyagent.backtest.data_loader import DataLoader, MarketSnapshot
 from polyagent.backtest.estimator import BaseEstimator
 from polyagent.models import Vote, VoteAction
@@ -150,10 +152,21 @@ class BacktestEngine:
             start_date, end_date, len(sorted_days), self._estimator.name,
         )
 
-        for day in sorted_days:
-            day_snapshots = by_day[day]
-            day_trades = self.process_day(day_snapshots, resolutions, day)
-            all_trades.extend(day_trades)
+        progress = Progress(
+            SpinnerColumn(),
+            TextColumn("[cyan]Backtesting"),
+            BarColumn(bar_width=40),
+            TextColumn("[green]{task.completed}/{task.total} days"),
+            TextColumn("[yellow]{task.fields[trades]} trades"),
+            TimeElapsedColumn(),
+        )
+        with progress:
+            task = progress.add_task("backtest", total=len(sorted_days), trades=0)
+            for day in sorted_days:
+                day_snapshots = by_day[day]
+                day_trades = self.process_day(day_snapshots, resolutions, day)
+                all_trades.extend(day_trades)
+                progress.update(task, advance=1, trades=len(all_trades))
 
         result = BacktestResult(
             trades=all_trades,
