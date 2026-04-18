@@ -21,6 +21,13 @@ def cli():
     pass
 
 
+@cli.command()
+def run():
+    """Start the trading bot (paper or live depending on .env)."""
+    from polyagent.main import run as _run
+    _run()
+
+
 cli.add_command(status)
 cli.add_command(perf)
 cli.add_command(positions)
