@@ -45,8 +45,8 @@ class HourlyBar:
             category=self.category,
             token_id=self.token_id,
             midpoint_price=self.close,
-            bids_depth=self.volume,
-            asks_depth=self.volume,
+            bids_depth=volume_24h,
+            asks_depth=volume_24h,
             hours_to_resolution=hours_to_resolution,
             volume_24h=volume_24h,
         )
