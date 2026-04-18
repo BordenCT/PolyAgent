@@ -30,12 +30,13 @@ class OllamaClient:
         prompt = (
             "You are a prediction market probability estimator. "
             "Given a market question, estimate the probability of YES occurring. "
+            "Always return a number — use 0.5 if genuinely uncertain. "
             "Return ONLY a JSON object: {\"probability\": 0.XX}\n\n"
             f"Question: {question}\n"
         )
         if context:
             prompt += f"Context: {context}\n"
-        prompt += "\nReturn ONLY valid JSON with a probability field (0.0 to 1.0)."
+        prompt += "\nReturn ONLY valid JSON. probability must be a number 0.0-1.0, never null."
 
         try:
             resp = self._http.post(
@@ -168,8 +169,10 @@ class OllamaClient:
         # Try JSON parse first
         try:
             data = json.loads(text)
-            p = float(data.get("probability", 0.5))
-            return max(0.0, min(1.0, p))
+            p = data.get("probability")
+            if p is not None:
+                return max(0.0, min(1.0, float(p)))
+            return 0.5  # model returned null — treat as uncertain
         except (json.JSONDecodeError, TypeError, ValueError):
             pass
 
