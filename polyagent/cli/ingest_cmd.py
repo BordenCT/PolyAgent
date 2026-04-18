@@ -13,8 +13,10 @@ from polyagent.scripts.ingest import DataIngester
 @click.option("--snapshot", is_flag=True, help="Download pre-built snapshot (~2GB) instead of scraping")
 @click.option("--full", is_flag=True, help="Full scrape from Goldsky subgraph (slow, 2+ days first run)")
 @click.option("--process", "process_only", is_flag=True, help="Just re-process existing orderFilled.csv into trades")
+@click.option("--candles", is_flag=True, help="Fetch OHLC price history for all markets via CLOB API")
+@click.option("--since", default=None, help="Fetch candles since this date (YYYY-MM-DD), e.g. --since 2024-01-01")
 @click.option("--data-dir", type=click.Path(), default="./data", help="Directory to store ingested data")
-def ingest(snapshot: bool, full: bool, process_only: bool, data_dir: str):
+def ingest(snapshot: bool, full: bool, process_only: bool, candles: bool, since: str | None, data_dir: str):
     """Fetch and process Polymarket historical data.
 
     Data is stored locally and used by the backtest engine.
@@ -24,6 +26,7 @@ def ingest(snapshot: bool, full: bool, process_only: bool, data_dir: str):
       --snapshot   Download pre-built snapshot (~2GB, fast)
       --full       Scrape from Goldsky subgraph (complete, slow)
       --process    Re-process existing raw data into trades
+      --candles    Fetch OHLC price history for all markets via CLOB API
 
     \b
     Examples:
@@ -31,9 +34,29 @@ def ingest(snapshot: bool, full: bool, process_only: bool, data_dir: str):
       polyagent ingest --snapshot --data-dir ~/data  # Custom directory
       polyagent ingest --full                        # Full scrape (2+ days first run)
       polyagent ingest --process                     # Re-process after fixing something
+      polyagent ingest --candles                     # Fetch candles for all 49,971 markets
+      polyagent ingest --candles --since 2024-01-01  # Candles from a specific date
     """
     console = Console()
     ingester = DataIngester(data_dir)
+
+    if candles:
+        console.print("[cyan]Fetching OHLC candles for all markets...[/cyan]")
+        # Ensure markets.csv exists first.
+        if not ingester.markets_csv.exists():
+            console.print("[cyan]Fetching market metadata first...[/cyan]")
+            ingester.fetch_markets()
+        try:
+            count = ingester.fetch_candles(since=since)
+            console.print(f"[green]Fetched {count:,} hourly bars -> {ingester.candles_csv}[/green]")
+            console.print(f"\n[bold green]Done![/bold green]")
+            console.print(f"[dim]Backtest with: polyagent backtest --data-dir {data_dir}[/dim]")
+        except Exception as e:
+            console.print(f"[red]Error: {e}[/red]")
+            raise
+        finally:
+            ingester.close()
+        return
 
     if not any([snapshot, full, process_only]):
         console.print("[yellow]No mode specified. Use --snapshot (recommended), --full, or --process[/yellow]")

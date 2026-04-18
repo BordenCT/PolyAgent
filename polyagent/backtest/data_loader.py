@@ -58,6 +58,125 @@ class DataLoader:
     def __init__(self, data_dir: str | Path) -> None:
         self._data_dir = Path(data_dir)
 
+    def load_bars(
+        self,
+        start_date: date | None = None,
+        end_date: date | None = None,
+    ) -> list[HourlyBar]:
+        """Load candles if available, otherwise fall back to trades.
+
+        Prefer ``load_candles`` (covers 49,971 markets via the CLOB API) over
+        ``load_hourly_bars`` (covers ~759 markets from on-chain trade data).
+        Run ``polyagent ingest --candles`` to populate candles.csv first.
+        """
+        candles_path = self._data_dir / "processed" / "candles.csv"
+        if candles_path.exists():
+            return self.load_candles(start_date, end_date)
+        return self.load_hourly_bars(start_date, end_date)
+
+    def load_candles(
+        self,
+        start_date: date | None = None,
+        end_date: date | None = None,
+    ) -> list[HourlyBar]:
+        """Load OHLCV candles from candles.csv (produced by ``polyagent ingest --candles``).
+
+        Each row in candles.csv represents one hourly bar for one token derived
+        from the Polymarket CLOB prices-history API.  Fields:
+        ``timestamp,market_id,condition_id,token_id,open,high,low,close,volume``
+
+        Args:
+            start_date: Inclusive lower bound on the bar date (UTC).
+            end_date: Inclusive upper bound on the bar date (UTC).
+
+        Returns:
+            Sorted list of HourlyBar objects ready for the backtest engine.
+        """
+        csv_path = self._data_dir / "processed" / "candles.csv"
+        if not csv_path.exists():
+            raise FileNotFoundError(
+                f"candles.csv not found at {csv_path}. "
+                "Run 'polyagent ingest --candles' to fetch price history."
+            )
+
+        logger.info("Loading candles from %s", csv_path)
+
+        progress = Progress(
+            SpinnerColumn(),
+            TextColumn("{task.description}"),
+            BarColumn(bar_width=40),
+            TextColumn("[green]{task.completed:,} rows"),
+            TimeElapsedColumn(),
+        )
+        with progress:
+            task = progress.add_task("[cyan]Loading candles...", total=None)
+
+            df = pl.read_csv(
+                str(csv_path),
+                schema_overrides={
+                    "market_id": pl.Utf8,
+                    "condition_id": pl.Utf8,
+                    "token_id": pl.Utf8,
+                    "open": pl.Float64,
+                    "high": pl.Float64,
+                    "low": pl.Float64,
+                    "close": pl.Float64,
+                    "volume": pl.Float64,
+                },
+            )
+            progress.update(task, completed=len(df))
+
+            df = df.with_columns(
+                pl.col("timestamp").str.to_datetime(strict=False).alias("_ts_dt")
+            )
+
+            if start_date:
+                df = df.filter(pl.col("_ts_dt").dt.date() >= start_date)
+            if end_date:
+                df = df.filter(pl.col("_ts_dt").dt.date() <= end_date)
+
+            progress.update(
+                task,
+                description=f"[green]Loaded {len(df):,} candle rows",
+            )
+
+        result: list[HourlyBar] = []
+        for row in df.iter_rows(named=True):
+            ts_dt = row["_ts_dt"]
+            if ts_dt is None:
+                continue
+            # Polars may return a naive datetime; attach UTC.
+            if ts_dt.tzinfo is None:
+                hour = ts_dt.replace(tzinfo=timezone.utc)
+            else:
+                hour = ts_dt.astimezone(timezone.utc)
+            # Truncate to the hour.
+            hour = hour.replace(minute=0, second=0, microsecond=0)
+
+            result.append(HourlyBar(
+                market_id=row.get("market_id") or "",
+                hour=hour,
+                open=Decimal(str(round(float(row.get("open") or 0), 6))),
+                close=Decimal(str(round(float(row.get("close") or 0), 6))),
+                high=Decimal(str(round(float(row.get("high") or 0), 6))),
+                low=Decimal(str(round(float(row.get("low") or 0), 6))),
+                volume=Decimal(str(round(float(row.get("volume") or 0), 2))),
+                first_ts=hour,
+                last_ts=hour,
+                question="",
+                category="unknown",
+                token_id=row.get("token_id") or "",
+            ))
+
+        result.sort(key=lambda b: (b.hour, b.market_id))
+        unique_markets = len({b.market_id for b in result})
+        logger.info(
+            "Loaded %d candle bars across %d markets",
+            len(result),
+            unique_markets,
+        )
+        return result
+
     def load_hourly_bars(
         self,
         start_date: date | None = None,
@@ -70,6 +189,11 @@ class DataLoader:
         observation's open and latest observation's close; accumulate high/low
         by max/min and volume by sum. This yields a stable aggregate no matter
         how chunk boundaries fall.
+
+        .. note::
+            ``load_candles`` (and the ``load_bars`` convenience method) is the
+            preferred data path when candles.csv is present — it covers all
+            49,971 Polymarket markets, versus the ~759 covered by trades.csv.
         """
         csv_path = self._data_dir / "processed" / "trades.csv"
         if not csv_path.exists():

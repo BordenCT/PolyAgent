@@ -113,7 +113,7 @@ def backtest(start, end, estimator, bankroll, kelly_max, data_dir, show_report, 
     console.print(f"[cyan]Loading historical data from {effective_data_dir}...[/cyan]")
     loader = DataLoader(effective_data_dir)
     try:
-        bars = loader.load_hourly_bars(start_date=start_date, end_date=end_date)
+        bars = loader.load_bars(start_date=start_date, end_date=end_date)
     except FileNotFoundError as e:
         console.print(f"[red]Error: {e}[/red]")
         console.print("[dim]Run 'polyagent ingest --snapshot' first to download historical data[/dim]")
@@ -167,7 +167,7 @@ def _run_comparison(console, settings, data_dir, start_date, end_date, bankroll,
     """Run all estimators and compare results side-by-side."""
     loader = DataLoader(data_dir)
     try:
-        bars = loader.load_hourly_bars(start_date=start_date, end_date=end_date)
+        bars = loader.load_bars(start_date=start_date, end_date=end_date)
     except FileNotFoundError as e:
         console.print(f"[red]Error: {e}[/red]")
         return

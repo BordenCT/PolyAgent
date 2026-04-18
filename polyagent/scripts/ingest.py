@@ -4,15 +4,18 @@ Three modes:
   polyagent ingest --snapshot    Download pre-built snapshot (~2GB), process into trades
   polyagent ingest --full        Scrape from Goldsky subgraph (slow, 2+ days first run)
   polyagent ingest --process     Just re-process existing orderFilled.csv into trades
+  polyagent ingest --candles     Fetch OHLC price history for all markets via CLOB API
 """
 from __future__ import annotations
 
+import concurrent.futures
 import csv
 import json
 import lzma
 import logging
 import os
 import time
+from calendar import timegm
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -72,6 +75,10 @@ class DataIngester:
     @property
     def trades_csv(self) -> Path:
         return self.data_dir / "processed" / "trades.csv"
+
+    @property
+    def candles_csv(self) -> Path:
+        return self.data_dir / "processed" / "candles.csv"
 
     # ── Stage 1: Markets ────────────────────────────────────────────────
 
@@ -412,6 +419,179 @@ class DataIngester:
             progress.update(task_proc, description=f"[green]Processed {total_trades:,} trades")
 
         return total_trades
+
+    # ── Stage 4: CLOB candles ────────────────────────────────────────────
+
+    def fetch_candles(
+        self,
+        since: str | None = None,
+        fidelity: int = 60,
+        workers: int = 8,
+    ) -> int:
+        """Fetch OHLC price history from the CLOB API for all markets in markets.csv.
+
+        For each token in markets.csv, calls GET
+        https://clob.polymarket.com/prices-history?market={token_id}&fidelity={fidelity}
+        and aggregates the tick-level (t, p) pairs into hourly OHLCV bars.
+
+        Args:
+            since: Optional ISO date string (YYYY-MM-DD). Only fetch candles
+                   after this date if provided.
+            fidelity: Candle fidelity in minutes (default 60 = 1h buckets).
+            workers: Thread pool size for parallel HTTP calls.
+
+        Returns:
+            Total number of hourly bars written to candles.csv.
+        """
+        if not self.markets_csv.exists():
+            raise FileNotFoundError(f"No markets.csv found at {self.markets_csv}")
+
+        # Determine start timestamp if --since was given.
+        start_ts: int | None = None
+        if since:
+            try:
+                dt = datetime.strptime(since, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+                start_ts = int(dt.timestamp())
+            except ValueError:
+                logger.warning("Could not parse --since value %r; ignoring", since)
+
+        # Load market token list.
+        markets = []
+        with open(self.markets_csv, newline="") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                for col in ("token1", "token2"):
+                    token_id = (row.get(col) or "").strip()
+                    if token_id:
+                        markets.append((
+                            token_id,
+                            row.get("id", ""),
+                            row.get("question", ""),
+                            row.get("condition_id", ""),
+                        ))
+
+        # Determine which tokens are already in candles.csv (skip mode).
+        already_done: set[str] = set()
+        if self.candles_csv.exists():
+            try:
+                with open(self.candles_csv, newline="") as f:
+                    reader = csv.DictReader(f)
+                    for row in reader:
+                        tid = (row.get("token_id") or "").strip()
+                        if tid:
+                            already_done.add(tid)
+                logger.info("Skipping %d already-fetched tokens", len(already_done))
+            except Exception as e:
+                logger.warning("Could not read existing candles.csv for dedup: %s", e)
+
+        tokens_to_fetch = [m for m in markets if m[0] not in already_done]
+        logger.info(
+            "Fetching candles for %d tokens (%d already done)",
+            len(tokens_to_fetch),
+            len(already_done),
+        )
+
+        # Shared HTTP client — httpx.Client is thread-safe for reads.
+        http = httpx.Client(timeout=30.0)
+
+        CLOB_URL = "https://clob.polymarket.com/prices-history"
+
+        def fetch_token(args: tuple[str, str, str, str]) -> list[dict]:
+            """Fetch + aggregate candles for one token. Returns list of bar dicts."""
+            token_id, market_id, question, condition_id = args
+            time.sleep(0.05)
+            try:
+                params: dict = {"market": token_id, "fidelity": fidelity}
+                if start_ts is not None:
+                    params["startTs"] = start_ts
+                resp = http.get(CLOB_URL, params=params)
+                resp.raise_for_status()
+                data = resp.json()
+                history = data.get("history", [])
+            except (httpx.HTTPError, json.JSONDecodeError, KeyError) as e:
+                logger.warning("Skipping token %s: %s", token_id, e)
+                return []
+
+            if not history:
+                return []
+
+            # Aggregate into hourly buckets.
+            buckets: dict[int, list[float]] = {}
+            for tick in history:
+                try:
+                    t = int(tick["t"])
+                    p = float(tick["p"])
+                except (KeyError, TypeError, ValueError):
+                    continue
+                hour_ts = t // 3600 * 3600
+                buckets.setdefault(hour_ts, []).append(p)
+
+            bars = []
+            for hour_ts, prices in sorted(buckets.items()):
+                dt = datetime.fromtimestamp(hour_ts, tz=timezone.utc)
+                bars.append({
+                    "timestamp": dt.strftime("%Y-%m-%dT%H:%M:%S"),
+                    "market_id": market_id,
+                    "condition_id": condition_id,
+                    "token_id": token_id,
+                    "open": prices[0],
+                    "high": max(prices),
+                    "low": min(prices),
+                    "close": prices[-1],
+                    "volume": len(prices),
+                })
+            return bars
+
+        # Ensure the output file has a header if it doesn't exist yet.
+        candles_columns = [
+            "timestamp", "market_id", "condition_id", "token_id",
+            "open", "high", "low", "close", "volume",
+        ]
+        file_exists = self.candles_csv.exists()
+
+        total_bars = 0
+        processed = 0
+
+        progress = Progress(
+            SpinnerColumn(),
+            TextColumn("{task.description}"),
+            BarColumn(bar_width=40),
+            TextColumn("[green]{task.completed:,}/{task.total:,} tokens"),
+            TimeElapsedColumn(),
+        )
+        with progress, open(self.candles_csv, "a", newline="") as out_f:
+            writer = csv.DictWriter(out_f, fieldnames=candles_columns)
+            if not file_exists:
+                writer.writeheader()
+
+            task = progress.add_task(
+                "[cyan]Fetching candles...",
+                total=len(tokens_to_fetch),
+            )
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+                futures = {pool.submit(fetch_token, args): args for args in tokens_to_fetch}
+                for future in concurrent.futures.as_completed(futures):
+                    bars = future.result()
+                    if bars:
+                        writer.writerows(bars)
+                        out_f.flush()
+                        total_bars += len(bars)
+                    processed += 1
+                    progress.update(
+                        task,
+                        completed=processed,
+                        description=f"[cyan]Fetching candles... {total_bars:,} bars written",
+                    )
+
+        http.close()
+        logger.info(
+            "Candles complete: %d bars written for %d tokens -> %s",
+            total_bars,
+            len(tokens_to_fetch),
+            self.candles_csv,
+        )
+        return total_bars
 
     # ── Helpers ──────────────────────────────────────────────────────────
 
