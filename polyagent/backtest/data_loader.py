@@ -117,7 +117,7 @@ class DataLoader:
                 else:
                     chunk = chunk.with_columns(
                         pl.col("timestamp").cast(pl.Utf8)
-                          .str.to_datetime(strict=False, use_earliest=True)
+                          .str.to_datetime(strict=False)
                           .alias("_ts_dt")
                     )
 
