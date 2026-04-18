@@ -86,7 +86,7 @@ class Settings:
             scan_interval_hours=_env_int("SCAN_INTERVAL_HOURS", 4),
             scan_market_limit=_env_int("SCAN_MARKET_LIMIT", 500),
             min_gap=_env_float("MIN_GAP", 0.07),
-            min_depth=_env_float("MIN_DEPTH", 500.0),
+            min_depth=_env_float("MIN_DEPTH", 100.0),
             min_hours=_env_float("MIN_HOURS", 4.0),
             max_hours=_env_float("MAX_HOURS", 168.0),
             anthropic_api_key=_env_str("ANTHROPIC_API_KEY", ""),

@@ -86,8 +86,9 @@ class PolymarketClient:
             category=raw.get("category", "unknown"),
             token_id=yes_token["token_id"],
             midpoint_price=Decimal(str(round(midpoint, 4))),
-            bids_depth=Decimal(str(raw.get("bid_depth", 0) or 0)),
-            asks_depth=Decimal(str(raw.get("ask_depth", 0) or 0)),
+            # CLOB /markets returns bid_depth=0 for most markets; fall back to volume_24h
+            bids_depth=Decimal(str(raw.get("bid_depth") or raw.get("volume", 0) or 0)),
+            asks_depth=Decimal(str(raw.get("ask_depth") or raw.get("volume", 0) or 0)),
             hours_to_resolution=max(0.0, hours_left),
             volume_24h=Decimal(str(raw.get("volume", 0) or 0)),
         )
