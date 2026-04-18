@@ -45,6 +45,7 @@ class OllamaClient:
                     "model": self._model,
                     "prompt": prompt,
                     "stream": False,
+                    "format": "json",
                     "options": {
                         "temperature": 0.1,
                         "num_predict": 64,
