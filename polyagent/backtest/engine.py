@@ -381,7 +381,9 @@ class BacktestEngine:
                             bar,
                             metadata=metadata,
                             resolutions=resolutions,
-                            rolling_volume=sum(vol_deque),
+                            # Candle volume = tick count, not USD — use a fixed
+                            # depth that passes the scanner's min_depth filter.
+                            rolling_volume=max(sum(vol_deque), 1000.0),
                         )
                         entered = True
                     elif position is not None:

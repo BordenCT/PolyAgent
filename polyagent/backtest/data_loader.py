@@ -452,10 +452,11 @@ class DataLoader:
             entry = {
                 "question": question,
                 "category": category,
-                "token_id": row.get("token1", "") or row.get("token_id", ""),
+                "token_id": str(row.get("token1", "") or row.get("token_id", "") or ""),
             }
-            market_id = row.get("id", "")
-            condition_id = row.get("condition_id", "")
+            # Polars may read numeric id columns as int — stringify everything.
+            market_id = str(row.get("id", "") or "")
+            condition_id = str(row.get("condition_id", "") or "")
             if market_id:
                 metadata[market_id] = entry
             if condition_id and condition_id != market_id:
