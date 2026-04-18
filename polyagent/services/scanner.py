@@ -77,16 +77,34 @@ class ScannerService:
             List of (market, score) tuples for markets that passed all filters.
         """
         survivors = []
+        killed_gap = killed_depth = killed_hours = 0
         for market in markets:
-            estimate = estimates.get(market.polymarket_id, float(market.midpoint_price))
-            score = self.score_market(market, estimate)
-            if score is not None:
-                survivors.append((market, score))
+            # Fallback to 0.5 (neutral prior), NOT midpoint — midpoint fallback zeros the gap
+            estimate = estimates.get(market.polymarket_id, 0.5)
+            price = float(market.midpoint_price)
+            gap = abs(estimate - price)
+            depth = float(market.min_depth)
+            hours = market.hours_to_resolution
+
+            if gap <= self._min_gap:
+                killed_gap += 1
+                continue
+            if depth < self._min_depth:
+                killed_depth += 1
+                continue
+            if hours < self._min_hours or hours > self._max_hours:
+                killed_hours += 1
+                continue
+
+            ev = round(gap * depth * 0.001, 2)
+            survivors.append((market, Score(gap=round(gap, 3), depth=depth, hours=hours, ev=ev)))
 
         logger.info(
-            "Scanned %d markets -> %d survivors (%.0f%% filtered)",
+            "Scanned %d markets -> %d survivors | killed: gap=%d depth=%d hours=%d",
             len(markets),
             len(survivors),
-            (1 - len(survivors) / max(len(markets), 1)) * 100,
+            killed_gap,
+            killed_depth,
+            killed_hours,
         )
         return survivors

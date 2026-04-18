@@ -128,7 +128,7 @@ def run() -> None:
                     questions = [{"id": m.polymarket_id, "question": m.question} for m in markets]
                     estimates = ollama.estimate_batch(questions)
                 else:
-                    estimates = {m.polymarket_id: float(m.midpoint_price) for m in markets}
+                    estimates = {}  # scanner falls back to 0.5 neutral prior per market
                 survivors = scanner.scan_batch(markets, estimates)
 
                 for market, score in survivors:
