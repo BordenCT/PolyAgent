@@ -104,19 +104,20 @@ class DataLoader:
                 if "timestamp" not in chunk.columns:
                     continue
 
-                # Normalise timestamp to UTC datetime regardless of source format.
-                # The ingest pipeline writes ISO strings after pl.from_epoch, but
-                # raw Goldsky CSVs contain Unix-epoch integers — handle both.
+                # Normalise timestamp to Datetime regardless of source format:
+                # integers → epoch seconds, Datetime → use directly, string → parse.
                 ts_dtype = chunk.schema["timestamp"]
                 if ts_dtype in (pl.Int32, pl.Int64, pl.UInt32, pl.UInt64, pl.Float32, pl.Float64):
                     chunk = chunk.with_columns(
                         pl.from_epoch(pl.col("timestamp").cast(pl.Int64), time_unit="s")
                           .alias("_ts_dt")
                     )
+                elif isinstance(ts_dtype, pl.Datetime):
+                    chunk = chunk.with_columns(pl.col("timestamp").alias("_ts_dt"))
                 else:
                     chunk = chunk.with_columns(
                         pl.col("timestamp").cast(pl.Utf8)
-                          .str.strptime(pl.Datetime("us", "UTC"), "%Y-%m-%d %H:%M:%S%.f", strict=False)
+                          .str.to_datetime(strict=False, use_earliest=True)
                           .alias("_ts_dt")
                     )
 
