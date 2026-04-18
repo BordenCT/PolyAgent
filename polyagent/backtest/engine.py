@@ -17,6 +17,8 @@ from decimal import Decimal
 
 from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
 
+import polars as pl
+
 from polyagent.backtest.data_loader import DataLoader, HourlyBar
 from polyagent.backtest.estimator import BaseEstimator
 from polyagent.models import ExitReason, Thesis, ThesisChecks, Vote, VoteAction
@@ -271,6 +273,142 @@ class BacktestEngine:
         )
         logger.info(
             "Backtest complete: %d trades, %.1f%% win rate, $%.2f P&L, Sharpe %.2f",
+            result.total_trades, result.win_rate, result.total_pnl, result.sharpe,
+        )
+        return result
+
+    def run_polars(
+        self,
+        df: pl.DataFrame,
+        resolutions: dict[str, dict],
+        start_date: date,
+        end_date: date,
+        bankroll: float = 800.0,
+        market_metadata: dict[str, dict] | None = None,
+    ) -> BacktestResult:
+        """Stream through a candles DataFrame market-by-market.
+
+        Unlike ``run()`` which holds all HourlyBar objects in memory, this
+        method processes one market at a time from the Polars DataFrame,
+        keeping peak memory proportional to the largest single market (~1000
+        bars) rather than the full dataset (48M+ rows).
+        """
+        metadata = market_metadata or {}
+
+        # Get unique market IDs ordered by their first bar so the progress bar
+        # reflects wall-clock time rather than arbitrary insertion order.
+        market_ids: list[str] = (
+            df.sort("_ts_dt")
+              .group_by("market_id")
+              .agg(pl.col("_ts_dt").min().alias("first_bar"))
+              .sort("first_bar")["market_id"]
+              .to_list()
+        )
+
+        logger.info(
+            "run_polars: %d markets, estimator=%s", len(market_ids), self._estimator.name,
+        )
+
+        trades: list[dict] = []
+        running_pnl = 0.0
+
+        def _equity_label() -> str:
+            equity = bankroll + running_pnl
+            pct = (running_pnl / bankroll * 100) if bankroll > 0 else 0.0
+            sign = "+" if running_pnl >= 0 else ""
+            return f"${equity:,.2f} ({sign}{pct:.1f}%)"
+
+        progress = Progress(
+            SpinnerColumn(),
+            TextColumn("[cyan]Backtesting"),
+            BarColumn(bar_width=40),
+            TextColumn("[green]{task.completed}/{task.total} markets"),
+            TextColumn("[yellow]{task.fields[trades]} trades"),
+            TextColumn("[magenta]{task.fields[equity]}"),
+            TimeElapsedColumn(),
+        )
+        with progress:
+            task = progress.add_task(
+                "backtest", total=len(market_ids), trades=0, equity=_equity_label(),
+            )
+
+            for market_id in market_ids:
+                market_df = (
+                    df.filter(pl.col("market_id") == market_id)
+                      .sort("_ts_dt")
+                )
+
+                resolution = resolutions.get(market_id)
+                if not resolution or resolution.get("final_price") is None:
+                    progress.update(task, advance=1)
+                    continue
+
+                meta = metadata.get(market_id, {})
+                vol_deque: deque = deque(maxlen=24)
+                position: _OpenPosition | None = None
+                entered = False
+
+                rows = market_df.iter_rows(named=True)
+                bar_list: list[HourlyBar] = []
+                for row in rows:
+                    ts = row["_ts_dt"]
+                    if ts is None:
+                        continue
+                    if ts.tzinfo is None:
+                        ts = ts.replace(tzinfo=timezone.utc)
+                    hour = ts.replace(minute=0, second=0, microsecond=0)
+                    bar = HourlyBar(
+                        market_id=market_id,
+                        hour=hour,
+                        open=Decimal(str(round(float(row.get("open") or 0), 6))),
+                        close=Decimal(str(round(float(row.get("close") or 0), 6))),
+                        high=Decimal(str(round(float(row.get("high") or 0), 6))),
+                        low=Decimal(str(round(float(row.get("low") or 0), 6))),
+                        volume=Decimal(str(round(float(row.get("volume") or 0), 2))),
+                        first_ts=hour,
+                        last_ts=hour,
+                        question=meta.get("question", ""),
+                        category=meta.get("category", "unknown"),
+                        token_id=meta.get("token_id", row.get("token_id") or ""),
+                    )
+                    bar_list.append(bar)
+
+                for idx, bar in enumerate(bar_list):
+                    vol_deque.append(float(bar.volume))
+
+                    if not entered:
+                        position = self._maybe_enter(
+                            bar,
+                            metadata=metadata,
+                            resolutions=resolutions,
+                            rolling_volume=sum(vol_deque),
+                        )
+                        entered = True
+                    elif position is not None:
+                        closed = self._maybe_close(position, bar, rolling=vol_deque)
+                        if closed is not None:
+                            trades.append(closed)
+                            running_pnl += closed["pnl"]
+                            position = None
+                        elif idx == len(bar_list) - 1:
+                            forced = self._force_close(position, bar, resolutions)
+                            trades.append(forced)
+                            running_pnl += forced["pnl"]
+                            position = None
+
+                progress.update(
+                    task, advance=1, trades=len(trades), equity=_equity_label(),
+                )
+
+        result = BacktestResult(
+            trades=trades,
+            start_date=start_date,
+            end_date=end_date,
+            estimator_name=self._estimator.name,
+            bankroll=bankroll,
+        )
+        logger.info(
+            "run_polars complete: %d trades, %.1f%% win rate, $%.2f P&L, Sharpe %.2f",
             result.total_trades, result.win_rate, result.total_pnl, result.sharpe,
         )
         return result

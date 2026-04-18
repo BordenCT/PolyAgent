@@ -112,23 +112,9 @@ def backtest(start, end, estimator, bankroll, kelly_max, data_dir, show_report, 
 
     console.print(f"[cyan]Loading historical data from {effective_data_dir}...[/cyan]")
     loader = DataLoader(effective_data_dir)
-    try:
-        bars = loader.load_bars(start_date=start_date, end_date=end_date)
-    except FileNotFoundError as e:
-        console.print(f"[red]Error: {e}[/red]")
-        console.print("[dim]Run 'polyagent ingest --snapshot' first to download historical data[/dim]")
-        return
 
     resolutions = loader.load_resolutions()
     market_metadata = loader.load_market_metadata()
-
-    resolution_ids = set(resolutions.keys())
-    matched = resolution_ids & set(market_metadata.keys())
-    console.print(
-        f"[cyan]Running backtest: {start_date} to {end_date} "
-        f"({len(bars):,} hourly bars, {len(resolutions):,} resolutions, "
-        f"{len(matched)}/{len(resolution_ids)} with metadata, estimator={estimator})[/cyan]"
-    )
 
     engine = BacktestEngine(
         scanner=scanner,
@@ -146,14 +132,56 @@ def backtest(start, end, estimator, bankroll, kelly_max, data_dir, show_report, 
         "max_hours": settings.max_hours,
     }
 
-    result = engine.run(
-        bars=bars,
-        resolutions=resolutions,
-        start_date=start_date,
-        end_date=end_date,
-        bankroll=effective_bankroll,
-        market_metadata=market_metadata,
-    )
+    from pathlib import Path
+    candles_path = Path(effective_data_dir) / "processed" / "candles.csv"
+
+    if candles_path.exists():
+        try:
+            candles_df = loader.load_candles_df(start_date=start_date, end_date=end_date)
+        except FileNotFoundError as e:
+            console.print(f"[red]Error: {e}[/red]")
+            return
+
+        resolution_ids = set(resolutions.keys())
+        matched = resolution_ids & set(market_metadata.keys())
+        n_markets = candles_df["market_id"].n_unique()
+        console.print(
+            f"[cyan]Running backtest: {start_date} to {end_date} "
+            f"({len(candles_df):,} candle rows, {n_markets:,} resolved markets, "
+            f"{len(resolutions):,} resolutions, {len(matched)}/{len(resolution_ids)} with metadata, "
+            f"estimator={estimator})[/cyan]"
+        )
+        result = engine.run_polars(
+            df=candles_df,
+            resolutions=resolutions,
+            start_date=start_date,
+            end_date=end_date,
+            bankroll=effective_bankroll,
+            market_metadata=market_metadata,
+        )
+    else:
+        try:
+            bars = loader.load_hourly_bars(start_date=start_date, end_date=end_date)
+        except FileNotFoundError as e:
+            console.print(f"[red]Error: {e}[/red]")
+            console.print("[dim]Run 'polyagent ingest --snapshot' first[/dim]")
+            return
+
+        resolution_ids = set(resolutions.keys())
+        matched = resolution_ids & set(market_metadata.keys())
+        console.print(
+            f"[cyan]Running backtest: {start_date} to {end_date} "
+            f"({len(bars):,} hourly bars, {len(resolutions):,} resolutions, "
+            f"{len(matched)}/{len(resolution_ids)} with metadata, estimator={estimator})[/cyan]"
+        )
+        result = engine.run(
+            bars=bars,
+            resolutions=resolutions,
+            start_date=start_date,
+            end_date=end_date,
+            bankroll=effective_bankroll,
+            market_metadata=market_metadata,
+        )
 
     _flush_estimator(est)
 

@@ -68,11 +68,100 @@ class DataLoader:
         Prefer ``load_candles`` (covers 49,971 markets via the CLOB API) over
         ``load_hourly_bars`` (covers ~759 markets from on-chain trade data).
         Run ``polyagent ingest --candles`` to populate candles.csv first.
+
+        .. note::
+            When candles.csv is present, use ``load_candles_df`` +
+            ``BacktestEngine.run_polars`` instead — it streams market-by-market
+            without materialising 48M Python objects.
         """
         candles_path = self._data_dir / "processed" / "candles.csv"
         if candles_path.exists():
             return self.load_candles(start_date, end_date)
         return self.load_hourly_bars(start_date, end_date)
+
+    def load_candles_df(
+        self,
+        start_date: date | None = None,
+        end_date: date | None = None,
+    ) -> "pl.DataFrame":
+        """Return candles as a Polars DataFrame — no Python object conversion.
+
+        Suitable for feeding directly into ``BacktestEngine.run_polars`` which
+        streams through the data market-by-market without loading all bars at
+        once.  Pre-filters to resolved markets (last close < 0.1 or > 0.9) so
+        the engine only evaluates markets with a clear final outcome.
+        """
+        csv_path = self._data_dir / "processed" / "candles.csv"
+        if not csv_path.exists():
+            raise FileNotFoundError(
+                f"candles.csv not found at {csv_path}. "
+                "Run 'polyagent ingest --candles' first."
+            )
+
+        progress = Progress(
+            SpinnerColumn(),
+            TextColumn("{task.description}"),
+            BarColumn(bar_width=40),
+            TextColumn("[green]{task.completed:,} rows"),
+            TimeElapsedColumn(),
+        )
+        with progress:
+            task = progress.add_task("[cyan]Reading candles...", total=None)
+
+            df = pl.read_csv(
+                str(csv_path),
+                schema_overrides={
+                    "market_id": pl.Utf8,
+                    "condition_id": pl.Utf8,
+                    "token_id": pl.Utf8,
+                    "open": pl.Float64,
+                    "high": pl.Float64,
+                    "low": pl.Float64,
+                    "close": pl.Float64,
+                    "volume": pl.Float64,
+                },
+            )
+            progress.update(task, completed=len(df))
+
+            df = df.with_columns(
+                pl.col("timestamp").str.to_datetime(strict=False).alias("_ts_dt")
+            )
+
+            if start_date:
+                df = df.filter(pl.col("_ts_dt").dt.date() >= start_date)
+            if end_date:
+                df = df.filter(pl.col("_ts_dt").dt.date() <= end_date)
+
+            # Keep only markets whose last observed close is near 0 or 1
+            # (i.e., actually resolved).  Active markets whose price sits at
+            # 0.5 give the historical estimator no edge and inflate scan time.
+            last_close = (
+                df.sort("_ts_dt")
+                  .group_by("market_id")
+                  .agg(pl.col("close").last().alias("last_close"))
+            )
+            resolved_ids = (
+                last_close
+                .filter(
+                    (pl.col("last_close") < 0.10) | (pl.col("last_close") > 0.90)
+                )["market_id"]
+                .to_list()
+            )
+            df = df.filter(pl.col("market_id").is_in(resolved_ids))
+
+            n_markets = df["market_id"].n_unique()
+            progress.update(
+                task,
+                description=(
+                    f"[green]{len(df):,} rows / {n_markets:,} resolved markets"
+                ),
+            )
+
+        logger.info(
+            "Candles DataFrame: %d rows, %d resolved markets",
+            len(df), n_markets,
+        )
+        return df
 
     def load_candles(
         self,
@@ -389,8 +478,45 @@ class DataLoader:
                 }
             return resolutions
 
+        candles_path = self._data_dir / "processed" / "candles.csv"
+        if candles_path.exists():
+            logger.info("Deriving resolutions from candles.csv...")
+            return self._derive_resolutions_from_candles()
+
         logger.info("No resolutions.csv found, deriving from trades data...")
         return self._derive_resolutions()
+
+    def _derive_resolutions_from_candles(self) -> dict[str, dict]:
+        """Derive last-price resolutions from candles.csv via fast Polars groupby."""
+        csv_path = self._data_dir / "processed" / "candles.csv"
+        df = pl.read_csv(
+            str(csv_path),
+            schema_overrides={"market_id": pl.Utf8, "close": pl.Float64},
+            columns=["timestamp", "market_id", "close"],
+        )
+        df = df.with_columns(
+            pl.col("timestamp").str.to_datetime(strict=False).alias("_ts_dt")
+        ).sort("_ts_dt")
+
+        last_per_market = df.group_by("market_id").agg([
+            pl.col("close").last().alias("final_price"),
+            pl.col("_ts_dt").max().alias("last_ts"),
+        ])
+
+        resolutions: dict[str, dict] = {}
+        for row in last_per_market.iter_rows(named=True):
+            mid = str(row["market_id"] or "")
+            if not mid:
+                continue
+            price = float(row["final_price"] or 0.5)
+            resolutions[mid] = {
+                "outcome": "Yes" if price > 0.5 else "No",
+                "final_price": price,
+                "resolution_date": str(row["last_ts"]),
+            }
+
+        logger.info("Derived %d resolutions from candles.csv", len(resolutions))
+        return resolutions
 
     def _derive_resolutions(self, chunk_size: int = 2_000_000) -> dict[str, dict]:
         """Derive final price per market from the last observed trade."""
