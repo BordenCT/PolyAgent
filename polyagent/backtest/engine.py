@@ -292,9 +292,8 @@ class BacktestEngine:
         bar.category = meta.get("category", bar.category)
         bar.token_id = meta.get("token_id", bar.token_id)
 
-        hours_to_resolution = _hours_until(resolution.get("resolution_date"), bar.hour)
         market = bar.to_market_data(
-            hours_to_resolution=hours_to_resolution,
+            hours_to_resolution=48.0,
             volume_24h=Decimal(str(round(rolling_volume, 2))),
         )
 
