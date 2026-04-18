@@ -140,7 +140,7 @@ class BacktestRepository:
                 {
                     "id": run_id,
                     "completed_at": datetime.now(timezone.utc),
-                    "results": json.dumps(results, default=_json_default),
+                    "results": json.dumps(_sanitize(results), default=_json_default),
                     "total_trades": total_trades,
                     "win_rate": win_rate,
                     "total_pnl": total_pnl,
@@ -209,6 +209,17 @@ def _trade_params(run_id: UUID, trade: dict) -> dict:
         "estimator_prob": trade["estimator_prob"],
         "market_price": trade["market_price"],
     }
+
+
+def _sanitize(obj: Any) -> Any:
+    """Recursively replace non-finite floats with None for JSON safety."""
+    if isinstance(obj, float):
+        return None if (obj != obj or obj == float("inf") or obj == float("-inf")) else obj
+    if isinstance(obj, dict):
+        return {k: _sanitize(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_sanitize(v) for v in obj]
+    return obj
 
 
 def _json_default(obj: Any) -> Any:
