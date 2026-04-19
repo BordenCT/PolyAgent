@@ -36,12 +36,12 @@ class TestPolymarketClient:
         assert market is not None
         assert market.midpoint_price == Decimal("0.4")
 
-    def test_parse_market_uses_liquidity_as_depth(self):
+    def test_parse_market_uses_volume24h_as_depth(self):
         market = self.client.parse_market(_GAMMA_RAW)
         assert market is not None
-        assert market.bids_depth == Decimal("250000.0")
-        assert market.asks_depth == Decimal("250000.0")
-        assert market.min_depth == Decimal("250000.0")
+        assert market.bids_depth == Decimal("150000.0")
+        assert market.asks_depth == Decimal("150000.0")
+        assert market.min_depth == Decimal("150000.0")
 
     def test_parse_market_missing_condition_id_skips(self):
         raw = dict(_GAMMA_RAW)

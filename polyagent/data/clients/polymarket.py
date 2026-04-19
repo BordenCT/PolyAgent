@@ -96,7 +96,7 @@ class PolymarketClient:
         else:
             hours_left = 999.0
 
-        liquidity = Decimal(str(raw.get("liquidityNum") or 0))
+        volume_24h = Decimal(str(raw.get("volume24hr") or 0))
 
         return MarketData(
             polymarket_id=condition_id,
@@ -104,10 +104,10 @@ class PolymarketClient:
             category=raw.get("category", "unknown"),
             token_id=token_ids[0],
             midpoint_price=Decimal(str(round(yes_price, 4))),
-            bids_depth=liquidity,
-            asks_depth=liquidity,
+            bids_depth=volume_24h,
+            asks_depth=volume_24h,
             hours_to_resolution=max(0.0, hours_left),
-            volume_24h=Decimal(str(raw.get("volume24hr") or 0)),
+            volume_24h=volume_24h,
         )
 
     def fetch_order_book(self, token_id: str) -> dict:
