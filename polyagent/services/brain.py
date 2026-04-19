@@ -45,9 +45,9 @@ class BrainService:
 
     def evaluate(self, market: MarketData, market_db_id: UUID) -> Thesis | None:
         """Run 4-check evaluation on a market. Returns Thesis or None if rejected."""
-        # Build RAG context from similar historical outcomes
+        # Build RAG context from similar historical outcomes (skipped if embeddings disabled)
         embedding = self._embeddings.embed_text(market.question)
-        similar = self._historical_repo.find_similar(embedding, limit=10)
+        similar = self._historical_repo.find_similar(embedding, limit=10) if embedding else []
         rag_context = self._format_rag_context(similar)
 
         # Get whale activity context

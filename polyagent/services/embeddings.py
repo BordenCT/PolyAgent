@@ -10,11 +10,18 @@ logger = logging.getLogger("polyagent.services.embeddings")
 
 
 class EmbeddingsService:
-    """Generates embeddings via Voyage AI and computes similarity."""
+    """Generates embeddings via Voyage AI and computes similarity.
+
+    When no API key is provided the service operates in disabled mode:
+    embed_text returns [] and embed_batch returns empty lists, allowing
+    callers to skip RAG without crashing.
+    """
 
     def __init__(self, api_key: str | None = None, model: str = "voyage-3.5-lite") -> None:
-        self._client = voyageai.Client(api_key=api_key) if api_key else voyageai.Client()
+        self._client = voyageai.Client(api_key=api_key) if api_key else None
         self._model = model
+        if not self._client:
+            logger.warning("VOYAGE_API_KEY not set — embeddings disabled, RAG context will be skipped")
 
     def embed_text(self, text: str) -> list[float]:
         """Generate an embedding for a single text.
@@ -23,8 +30,10 @@ class EmbeddingsService:
             text: The text to embed.
 
         Returns:
-            A list of floats representing the embedding vector.
+            A list of floats representing the embedding vector, or [] if disabled.
         """
+        if not self._client:
+            return []
         result = self._client.embed([text], model=self._model)
         return result.embeddings[0]
 
@@ -35,9 +44,9 @@ class EmbeddingsService:
             texts: List of texts to embed.
 
         Returns:
-            A list of embedding vectors, one per input text.
+            A list of embedding vectors, one per input text, or [] if disabled.
         """
-        if not texts:
+        if not texts or not self._client:
             return []
         result = self._client.embed(texts, model=self._model)
         return result.embeddings
