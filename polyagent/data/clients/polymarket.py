@@ -13,6 +13,8 @@ from polyagent.models import MarketData
 
 logger = logging.getLogger("polyagent.clients.polymarket")
 
+_GAMMA_BASE = "https://gamma-api.polymarket.com"
+
 
 class PolymarketClient:
     """Wraps the Polymarket CLOB REST API and CLI."""
@@ -20,77 +22,92 @@ class PolymarketClient:
     def __init__(self, base_url: str = "https://clob.polymarket.com") -> None:
         self._base_url = base_url
         self._http = httpx.Client(base_url=base_url, timeout=30.0)
+        self._gamma = httpx.Client(base_url=_GAMMA_BASE, timeout=30.0)
 
     def fetch_markets(self, limit: int = 500) -> list[dict]:
-        """Fetch active markets from the CLOB API with cursor-based pagination.
+        """Fetch active, non-closed markets from the Gamma API sorted by 24h volume.
+
+        The CLOB /markets endpoint paginates from oldest to newest and returns
+        closed markets with no price or depth data. Gamma returns only live
+        markets and includes liquidityNum and volume24hr.
 
         Args:
             limit: Maximum number of markets to return.
 
         Returns:
-            List of raw market dicts from the API.
+            List of raw Gamma market dicts.
         """
-        markets = []
-        next_cursor = None
+        markets: list[dict] = []
+        offset = 0
+        per_page = min(100, limit)
 
         while len(markets) < limit:
-            params = {"limit": min(100, limit - len(markets)), "active": "true"}
-            if next_cursor:
-                params["next_cursor"] = next_cursor
-
-            resp = self._http.get("/markets", params=params)
+            params = {
+                "active": "true",
+                "closed": "false",
+                "limit": min(per_page, limit - len(markets)),
+                "offset": offset,
+                "order": "volume24hr",
+                "ascending": "false",
+            }
+            resp = self._gamma.get("/markets", params=params)
             resp.raise_for_status()
-            data = resp.json()
-
-            batch = data.get("data", data) if isinstance(data, dict) else data
-            if not batch:
+            batch = resp.json()
+            if not isinstance(batch, list) or not batch:
                 break
-            markets.extend(batch if isinstance(batch, list) else [batch])
-
-            next_cursor = data.get("next_cursor") if isinstance(data, dict) else None
-            if not next_cursor:
+            markets.extend(batch)
+            offset += len(batch)
+            if len(batch) < per_page:
                 break
 
-        logger.info("Fetched %d markets from CLOB API", len(markets))
+        logger.info("Fetched %d markets from Gamma API", len(markets))
         return markets[:limit]
 
     def parse_market(self, raw: dict) -> MarketData | None:
-        """Parse raw API response into a MarketData model.
+        """Parse a Gamma API market dict into a MarketData model.
 
         Args:
-            raw: Raw market dict from the CLOB API.
+            raw: Raw market dict from the Gamma API.
 
         Returns:
-            A MarketData instance, or None if the market has no tokens.
+            A MarketData instance, or None if required fields are missing.
         """
-        tokens = raw.get("tokens", [])
-        if not tokens:
+        condition_id = raw.get("conditionId")
+        if not condition_id:
             return None
 
-        yes_token = next((t for t in tokens if t.get("outcome") == "Yes"), tokens[0])
+        try:
+            token_ids: list[str] = json.loads(raw.get("clobTokenIds") or "[]")
+        except (json.JSONDecodeError, TypeError):
+            return None
+        if not token_ids:
+            return None
 
-        best_bid = raw.get("best_bid", 0) or 0
-        best_ask = raw.get("best_ask", 0) or 0
-        midpoint = (float(best_bid) + float(best_ask)) / 2
+        try:
+            prices: list[str] = json.loads(raw.get("outcomePrices") or "[]")
+            yes_price = float(prices[0]) if prices else 0.5
+        except (json.JSONDecodeError, TypeError, IndexError, ValueError):
+            yes_price = 0.5
 
-        end_date_str = raw.get("end_date_iso", "")
+        end_date_str = raw.get("endDate", "")
         if end_date_str:
             end_date = datetime.fromisoformat(end_date_str.replace("Z", "+00:00"))
             hours_left = (end_date - datetime.now(timezone.utc)).total_seconds() / 3600
         else:
             hours_left = 999.0
 
+        liquidity = Decimal(str(raw.get("liquidityNum") or 0))
+
         return MarketData(
-            polymarket_id=raw["condition_id"],
+            polymarket_id=condition_id,
             question=raw.get("question", ""),
             category=raw.get("category", "unknown"),
-            token_id=yes_token["token_id"],
-            midpoint_price=Decimal(str(round(midpoint, 4))),
-            # CLOB /markets returns bid_depth=0 for most markets; fall back to volume_24h
-            bids_depth=Decimal(str(raw.get("bid_depth") or raw.get("volume", 0) or 0)),
-            asks_depth=Decimal(str(raw.get("ask_depth") or raw.get("volume", 0) or 0)),
+            token_id=token_ids[0],
+            midpoint_price=Decimal(str(round(yes_price, 4))),
+            bids_depth=liquidity,
+            asks_depth=liquidity,
             hours_to_resolution=max(0.0, hours_left),
-            volume_24h=Decimal(str(raw.get("volume", 0) or 0)),
+            volume_24h=Decimal(str(raw.get("volume24hr") or 0)),
         )
 
     def fetch_order_book(self, token_id: str) -> dict:
@@ -207,5 +224,6 @@ class PolymarketClient:
         return {"ok": True, "request": request, "response": response}
 
     def close(self) -> None:
-        """Close the HTTP client."""
+        """Close the HTTP clients."""
         self._http.close()
+        self._gamma.close()

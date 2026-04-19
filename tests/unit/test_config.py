@@ -12,7 +12,7 @@ class TestSettings:
             assert s.scan_interval_hours == 4
             assert s.scan_market_limit == 500
             assert s.min_gap == 0.07
-            assert s.min_depth == 500.0
+            assert s.min_depth == 100.0
             assert s.min_hours == 4.0
             assert s.max_hours == 168.0
             assert s.kelly_max_fraction == 0.25
