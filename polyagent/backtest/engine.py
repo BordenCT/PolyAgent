@@ -154,11 +154,15 @@ class BacktestEngine:
         executor: ExecutorService,
         exit_monitor: ExitMonitorService,
         estimator: BaseEstimator,
+        scan_interval_hours: int = 4,
+        transaction_cost_pct: float = 0.02,
     ) -> None:
         self._scanner = scanner
         self._executor = executor
         self._exit_monitor = exit_monitor
         self._estimator = estimator
+        self._scan_interval_hours = scan_interval_hours
+        self._transaction_cost_pct = transaction_cost_pct
 
     def run(
         self,
@@ -240,11 +244,13 @@ class BacktestEngine:
 
                     elif bar.market_id not in evaluated:
                         evaluated.add(bar.market_id)
+                        current_bankroll = bankroll + running_pnl
                         position = self._maybe_enter(
                             bar,
                             metadata=metadata,
                             resolutions=resolutions,
                             rolling_volume=sum(vol_deque),
+                            current_bankroll=current_bankroll,
                         )
                         if position is not None:
                             open_positions[bar.market_id] = position
@@ -346,7 +352,8 @@ class BacktestEngine:
                 meta = metadata.get(market_id, {})
                 vol_deque: deque = deque(maxlen=24)
                 position: _OpenPosition | None = None
-                entered = False
+                # Allow entry on bar 0; re-evaluate every scan_interval_hours bars.
+                last_entry_bar: int = -self._scan_interval_hours
 
                 rows = market_df.iter_rows(named=True)
                 bar_list: list[HourlyBar] = []
@@ -376,27 +383,28 @@ class BacktestEngine:
                 for idx, bar in enumerate(bar_list):
                     vol_deque.append(float(bar.volume))
 
-                    if not entered:
-                        position = self._maybe_enter(
-                            bar,
-                            metadata=metadata,
-                            resolutions=resolutions,
-                            # Candle volume = tick count, not USD — use a fixed
-                            # depth that passes the scanner's min_depth filter.
-                            rolling_volume=max(sum(vol_deque), 1000.0),
-                        )
-                        entered = True
-                    elif position is not None:
+                    if position is not None:
                         closed = self._maybe_close(position, bar, rolling=vol_deque)
                         if closed is not None:
                             trades.append(closed)
                             running_pnl += closed["pnl"]
                             position = None
+                            last_entry_bar = idx  # cooldown restarts after close
                         elif idx == len(bar_list) - 1:
                             forced = self._force_close(position, bar, resolutions)
                             trades.append(forced)
                             running_pnl += forced["pnl"]
                             position = None
+                    elif idx - last_entry_bar >= self._scan_interval_hours:
+                        current_bankroll = bankroll + running_pnl
+                        position = self._maybe_enter(
+                            bar,
+                            metadata=metadata,
+                            resolutions=resolutions,
+                            rolling_volume=sum(vol_deque),
+                            current_bankroll=current_bankroll,
+                        )
+                        last_entry_bar = idx  # reset whether or not we entered
 
                 progress.update(
                     task, advance=1, trades=len(trades), equity=_equity_label(),
@@ -421,6 +429,7 @@ class BacktestEngine:
         metadata: dict[str, dict],
         resolutions: dict[str, dict],
         rolling_volume: float,
+        current_bankroll: float | None = None,
     ) -> _OpenPosition | None:
         """Decide whether to enter on this bar. Returns an open position or None."""
         resolution = resolutions.get(bar.market_id)
@@ -432,18 +441,31 @@ class BacktestEngine:
         bar.category = meta.get("category", bar.category)
         bar.token_id = meta.get("token_id", bar.token_id)
 
+        # Real hours remaining — fall back to 48h only if resolution_date is absent.
+        resolution_date = resolution.get("resolution_date")
+        hours_left = _hours_until(resolution_date, bar.hour) if resolution_date else 48.0
+
         market = bar.to_market_data(
-            hours_to_resolution=48.0,
+            hours_to_resolution=hours_left,
             volume_24h=Decimal(str(round(rolling_volume, 2))),
         )
 
-        estimate = self._estimator.estimate(
-            bar.market_id,
-            outcome=resolution.get("outcome"),
-            final_price=float(resolution["final_price"]),
-            market_price=float(bar.close),
-            question=bar.question,
-        )
+        # Only pass look-ahead kwargs (outcome, final_price) to estimators that
+        # declare they use them. All others see only market_price and question.
+        if self._estimator.is_lookahead:
+            estimate = self._estimator.estimate(
+                bar.market_id,
+                outcome=resolution.get("outcome"),
+                final_price=float(resolution["final_price"]),
+                market_price=float(bar.close),
+                question=bar.question,
+            )
+        else:
+            estimate = self._estimator.estimate(
+                bar.market_id,
+                market_price=float(bar.close),
+                question=bar.question,
+            )
 
         score = self._scanner.score_market(market, estimate)
         if score is None:
@@ -463,7 +485,10 @@ class BacktestEngine:
             Vote(action=VoteAction.HOLD, confidence=0.3, reason="backtest"),
         ]
 
-        plan = self._executor.plan(thesis=thesis, votes=votes, market_price=bar.close)
+        plan = self._executor.plan(
+            thesis=thesis, votes=votes, market_price=bar.close,
+            current_bankroll=current_bankroll,
+        )
         if plan is None:
             return None
 
@@ -564,6 +589,9 @@ class BacktestEngine:
             position_size=position.position_size,
             side=position.side,
         ))
+        # Deduct round-trip transaction cost (entry + exit) from P&L.
+        if self._transaction_cost_pct > 0:
+            pnl -= float(position.position_size) * self._transaction_cost_pct
         return {
             "polymarket_id": position.market_id,
             "question": position.question,

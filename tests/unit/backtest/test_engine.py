@@ -31,6 +31,8 @@ def _make_engine(estimator: BaseEstimator | None = None) -> BacktestEngine:
             target_pct=0.85, volume_multiplier=3, stale_hours=24, stale_threshold=0.02,
         ),
         estimator=estimator or FixedEstimator(0.80),
+        scan_interval_hours=1,   # 1-bar interval so small test fixtures can enter
+        transaction_cost_pct=0.0,  # excluded from unit tests — tested separately
     )
 
 
@@ -184,6 +186,56 @@ class TestOneEntryPerMarket:
         result = engine.run(bars, resolutions, START, END, bankroll=800.0)
 
         assert result.total_trades == 1
+
+
+class TestTransactionCosts:
+    """Transaction costs reduce P&L by cost_pct * position_size."""
+
+    def test_costs_reduce_pnl(self):
+        bars = [
+            _bar("0xC1", _hour(0), "0.40"),
+            _bar("0xC1", _hour(1), close="0.72", high="0.78", low="0.70"),
+        ]
+        resolutions = {"0xC1": {"outcome": "Yes", "final_price": 1.0}}
+
+        engine_free = _make_engine(FixedEstimator(0.80))
+        engine_cost = BacktestEngine(
+            scanner=ScannerService(min_gap=0.07, min_depth=500, min_hours=4, max_hours=168),
+            executor=ExecutorService(kelly_max_fraction=0.25, bankroll=800, paper_trade=True),
+            exit_monitor=ExitMonitorService(
+                target_pct=0.85, volume_multiplier=3, stale_hours=24, stale_threshold=0.02,
+            ),
+            estimator=FixedEstimator(0.80),
+            scan_interval_hours=1,
+            transaction_cost_pct=0.02,
+        )
+
+        result_free = engine_free.run(bars, resolutions, START, END, bankroll=800.0)
+        result_cost = engine_cost.run(bars, resolutions, START, END, bankroll=800.0)
+
+        assert result_free.total_trades == 1
+        assert result_cost.total_trades == 1
+        assert result_cost.trades[0]["pnl"] < result_free.trades[0]["pnl"]
+
+
+class TestNoLookahead:
+    """Non-historical estimators must not receive outcome or final_price."""
+
+    def test_fixed_estimator_ignores_resolution_data(self):
+        # FixedEstimator always returns 0.80 regardless of kwargs.
+        # If look-ahead data leaked, a smarter estimator could cheat.
+        # This test verifies the engine runs cleanly with is_lookahead=False.
+        bars = [
+            _bar("0xL1", _hour(0), "0.40"),
+            _bar("0xL1", _hour(1), "0.75"),
+        ]
+        resolutions = {"0xL1": {"outcome": "Yes", "final_price": 1.0, "resolution_date": None}}
+
+        engine = _make_engine(FixedEstimator(0.80))
+        result = engine.run(bars, resolutions, START, END, bankroll=800.0)
+
+        assert result.total_trades == 1
+        assert result.trades[0]["estimator_prob"] == pytest.approx(0.80)
 
 
 class TestResultMetrics:

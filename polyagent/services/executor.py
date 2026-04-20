@@ -95,8 +95,14 @@ class ExecutorService:
         thesis: Thesis,
         votes: list[Vote],
         market_price: Decimal,
+        current_bankroll: float | None = None,
     ) -> TradePlan | None:
-        """Run consensus + Kelly sizing. Returns an intent to open, or None."""
+        """Run consensus + Kelly sizing. Returns an intent to open, or None.
+
+        Args:
+            current_bankroll: Running equity for dynamic Kelly sizing. Falls back
+                              to the configured bankroll if None.
+        """
         consensus, fraction = self.compute_consensus(votes)
 
         if consensus == Consensus.NONE:
@@ -111,6 +117,7 @@ class ExecutorService:
         kelly_amount = self.kelly_size(
             p_win=thesis.claude_estimate,
             market_price=float(market_price),
+            bankroll=current_bankroll,
         )
         position_size = round(kelly_amount * fraction, 2)
 
@@ -121,12 +128,15 @@ class ExecutorService:
         expected_gap = thesis.claude_estimate - float(market_price)
         target_price = float(market_price) + (expected_gap * 0.85)
 
+        effective_bankroll = current_bankroll if current_bankroll is not None else self._bankroll
+        kelly_fraction = round(kelly_amount / effective_bankroll, 4) if effective_bankroll > 0 else 0.0
+
         return TradePlan(
             consensus=consensus,
             side=PositionSide.BUY,
             market_price=market_price,
             target_price=Decimal(str(round(target_price, 4))),
-            kelly_fraction=round(kelly_amount / self._bankroll, 4),
+            kelly_fraction=kelly_fraction,
             position_size=Decimal(str(position_size)),
         )
 

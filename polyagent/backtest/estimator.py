@@ -13,6 +13,8 @@ logger = logging.getLogger("polyagent.backtest.estimator")
 class BaseEstimator(ABC):
     """Interface for backtest probability estimators."""
 
+    is_lookahead: bool = False  # True only for estimators that use future outcome data
+
     @property
     @abstractmethod
     def name(self) -> str: ...
@@ -29,6 +31,7 @@ class HistoricalEstimator(BaseEstimator):
     """
 
     name = "historical"
+    is_lookahead = True
 
     def estimate(self, market_id: str, **kwargs) -> float:
         outcome = kwargs.get("outcome", "")
