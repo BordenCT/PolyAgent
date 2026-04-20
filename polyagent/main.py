@@ -36,7 +36,7 @@ logger = logging.getLogger("polyagent.main")
 
 def run() -> None:
     """Main entry point for the bot."""
-    setup_logging()
+    setup_logging(level=os.environ.get("LOG_LEVEL", "INFO"))
     settings = Settings.from_env()
     live_enabled = not settings.paper_trade and settings.polymarket_live_enabled
     logger.info(

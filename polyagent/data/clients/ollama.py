@@ -98,6 +98,7 @@ class OllamaClient:
             )
             resp.raise_for_status()
             text = resp.json().get("response", "")
+            logger.debug("Ollama raw evaluation: %s", text)
             return self._parse_evaluation(text)
         except (httpx.HTTPError, json.JSONDecodeError) as e:
             logger.warning("Ollama evaluate_market failed: %s", e)
