@@ -36,12 +36,14 @@ class BrainService:
         historical_repo,
         confidence_threshold: float = 0.75,
         min_checks: int = 3,
+        min_edge: float = 0.03,
     ) -> None:
         self._llm = llm_evaluator
         self._embeddings = embeddings_service
         self._historical_repo = historical_repo
         self._confidence_threshold = confidence_threshold
         self._min_checks = min_checks
+        self._min_edge = min_edge
 
     def evaluate(self, market: MarketData, market_db_id: UUID) -> Thesis | None:
         """Run 4-check evaluation on a market. Returns Thesis or None if rejected."""
@@ -88,6 +90,18 @@ class BrainService:
                 market.polymarket_id,
                 confidence,
                 self._confidence_threshold,
+            )
+            return None
+
+        edge = abs(probability - float(market.midpoint_price))
+        if edge < self._min_edge:
+            logger.info(
+                "REJECT %s — edge %.4f below %.4f threshold (p=%.4f price=%.4f)",
+                market.polymarket_id,
+                edge,
+                self._min_edge,
+                probability,
+                float(market.midpoint_price),
             )
             return None
 

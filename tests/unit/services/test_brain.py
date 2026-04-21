@@ -20,6 +20,7 @@ class TestBrainService:
             historical_repo=self.historical_repo,
             confidence_threshold=0.75,
             min_checks=3,
+            min_edge=0.03,
         )
 
     def _make_market(self) -> MarketData:
@@ -81,6 +82,23 @@ class TestBrainService:
             "probability": 0.60,
             "confidence": 0.50,  # below 0.75 threshold
             "thesis": "All checks pass but low confidence",
+        }
+
+        result = self.brain.evaluate(self._make_market(), market_db_id=uuid4())
+        assert result is None
+
+    def test_evaluate_rejects_tiny_edge(self):
+        """Reject rubber-stamp evaluations where model probability ~= market price."""
+        self.embeddings.embed_text.return_value = [0.1] * 1024
+        self.historical_repo.find_similar.return_value = []
+        self.claude.evaluate_market.return_value = {
+            "base_rate": True,
+            "news": True,
+            "whale": True,
+            "disposition": True,
+            "probability": 0.41,  # market is 0.40 — edge = 0.01, below 0.03 gate
+            "confidence": 0.90,
+            "thesis": "Barely disagrees with the market",
         }
 
         result = self.brain.evaluate(self._make_market(), market_db_id=uuid4())

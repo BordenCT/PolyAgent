@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import signal
 import time
 from datetime import datetime, timezone
@@ -98,6 +99,7 @@ def run() -> None:
         historical_repo=historical_repo,
         confidence_threshold=settings.brain_confidence_threshold,
         min_checks=settings.brain_min_checks,
+        min_edge=settings.brain_min_edge,
     )
     executor = ExecutorService(
         kelly_max_fraction=settings.kelly_max_fraction,

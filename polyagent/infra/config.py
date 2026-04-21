@@ -44,6 +44,7 @@ class Settings:
     anthropic_api_key: str
     brain_confidence_threshold: float
     brain_min_checks: int
+    brain_min_edge: float
     kelly_max_fraction: float
     bankroll: float
     exit_target_pct: float
@@ -92,6 +93,7 @@ class Settings:
             anthropic_api_key=_env_str("ANTHROPIC_API_KEY", ""),
             brain_confidence_threshold=_env_float("BRAIN_CONFIDENCE_THRESHOLD", 0.75),
             brain_min_checks=_env_int("BRAIN_MIN_CHECKS", 3),
+            brain_min_edge=_env_float("BRAIN_MIN_EDGE", 0.03),
             kelly_max_fraction=_env_float("KELLY_MAX_FRACTION", 0.25),
             bankroll=_env_float("BANKROLL", 800.0),
             exit_target_pct=_env_float("EXIT_TARGET_PCT", 0.85),
