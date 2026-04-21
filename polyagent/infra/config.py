@@ -52,6 +52,7 @@ class Settings:
     exit_volume_multiplier: float
     exit_stale_hours: float
     exit_stale_threshold: float
+    exit_poll_delay: float
     scanner_workers: int | None
     brain_workers: int | None
     executor_workers: int | None
@@ -102,6 +103,7 @@ class Settings:
             exit_volume_multiplier=_env_float("EXIT_VOLUME_MULTIPLIER", 3.0),
             exit_stale_hours=_env_float("EXIT_STALE_HOURS", 24.0),
             exit_stale_threshold=_env_float("EXIT_STALE_THRESHOLD", 0.02),
+            exit_poll_delay=_env_float("EXIT_POLL_DELAY", 0.35),
             scanner_workers=_env_int("SCANNER_WORKERS"),
             brain_workers=_env_int("BRAIN_WORKERS"),
             executor_workers=_env_int("EXECUTOR_WORKERS"),

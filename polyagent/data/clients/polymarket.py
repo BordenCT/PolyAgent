@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import logging
 import subprocess
+import time
 from datetime import datetime, timezone
 from decimal import Decimal
 
@@ -136,6 +137,7 @@ class PolymarketClient:
         """Fetch a fresh price + 24h volume snapshot for one market.
 
         Used by the exit monitor to refresh current_price and detect volume spikes.
+        Retries once after a back-off on 429 (rate limit).
 
         Args:
             condition_id: Polymarket market condition id.
@@ -143,20 +145,33 @@ class PolymarketClient:
         Returns:
             Dict with keys 'midpoint_price' and 'volume_24h', or None on failure.
         """
-        try:
-            resp = self._http.get(f"/markets/{condition_id}")
-            resp.raise_for_status()
-            raw = resp.json()
-            best_bid = float(raw.get("best_bid", 0) or 0)
-            best_ask = float(raw.get("best_ask", 0) or 0)
-            midpoint = (best_bid + best_ask) / 2 if best_bid and best_ask else best_bid or best_ask
-            return {
-                "midpoint_price": Decimal(str(round(midpoint, 4))),
-                "volume_24h": Decimal(str(raw.get("volume", 0) or 0)),
-            }
-        except (httpx.HTTPError, ValueError) as e:
-            logger.warning("Failed to refresh market state for %s: %s", condition_id, e)
-            return None
+        for attempt in range(2):
+            try:
+                resp = self._http.get(f"/markets/{condition_id}")
+                resp.raise_for_status()
+                raw = resp.json()
+                best_bid = float(raw.get("best_bid", 0) or 0)
+                best_ask = float(raw.get("best_ask", 0) or 0)
+                midpoint = (best_bid + best_ask) / 2 if best_bid and best_ask else best_bid or best_ask
+                return {
+                    "midpoint_price": Decimal(str(round(midpoint, 4))),
+                    "volume_24h": Decimal(str(raw.get("volume", 0) or 0)),
+                }
+            except httpx.HTTPStatusError as e:
+                if e.response.status_code == 429 and attempt == 0:
+                    retry_after = float(e.response.headers.get("Retry-After", "5"))
+                    logger.info(
+                        "Rate limited on %s — backing off %.1fs",
+                        condition_id, retry_after,
+                    )
+                    time.sleep(retry_after)
+                    continue
+                logger.warning("Failed to refresh market state for %s: %s", condition_id, e)
+                return None
+            except (httpx.HTTPError, ValueError) as e:
+                logger.warning("Failed to refresh market state for %s: %s", condition_id, e)
+                return None
+        return None
 
     def place_order(
         self,

@@ -252,6 +252,9 @@ def run() -> None:
             try:
                 open_positions = position_repo.get_open()
                 for pos in open_positions:
+                    if not queues.shutdown.empty():
+                        break
+                    time.sleep(settings.exit_poll_delay)
                     snapshot = polymarket.fetch_market_state(pos["polymarket_id"])
                     current_price = snapshot["midpoint_price"] if snapshot else pos["current_price"]
                     current_volume = float(snapshot["volume_24h"]) if snapshot else float(pos.get("volume_at_entry") or 0)
@@ -301,7 +304,8 @@ def run() -> None:
     n_scanner = pool.compute_workers("scanner", 3, settings.scanner_workers)
     n_brain = pool.compute_workers("brain", 6, settings.brain_workers)
     n_executor = pool.compute_workers("executor", 24, settings.executor_workers)
-    n_exit = pool.compute_workers("exit_monitor", 6, settings.exit_workers)
+    n_exit = settings.exit_workers if settings.exit_workers is not None else 1
+    logger.info("exit_monitor: %d workers (pinned low to respect CLOB rate limit)", n_exit)
 
     pool.spawn("scanner", scanner_worker, n_scanner)
     pool.spawn("brain", brain_worker, n_brain)
