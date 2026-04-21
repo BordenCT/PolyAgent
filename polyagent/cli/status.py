@@ -2,11 +2,13 @@
 from __future__ import annotations
 
 import time
+from decimal import Decimal
 
 import click
 from rich.console import Console
 from rich.table import Table
 
+from polyagent.data.repositories.positions import PositionRepository
 from polyagent.infra.config import Settings
 from polyagent.infra.database import Database
 
@@ -32,6 +34,10 @@ def status(watch: bool):
                 cur.execute("SELECT COUNT(*) as cnt FROM thesis WHERE created_at > NOW() - INTERVAL '24 hours'")
                 recent_theses = cur.fetchone()["cnt"]
 
+            position_repo = PositionRepository(db)
+            open_capital, realized_pnl = position_repo.get_capital_state()
+            starting = Decimal(str(settings.bankroll))
+            free_bankroll = starting + realized_pnl - open_capital
             db.close()
 
             table = Table(title="PolyAgent Status")
@@ -46,7 +52,13 @@ def status(watch: bool):
             table.add_row("Markets Rejected", str(market_counts.get("rejected", 0)))
             table.add_row("Open Positions", str(open_positions))
             table.add_row("Theses (24h)", str(recent_theses))
-            table.add_row("Bankroll", f"${settings.bankroll:,.2f}")
+            table.add_row("Starting Bankroll", f"${float(starting):,.2f}")
+            table.add_row("Realized P&L", _colorize_pnl(realized_pnl))
+            table.add_row("Open Capital", f"${float(open_capital):,.2f}")
+            table.add_row(
+                "Free Bankroll",
+                _free_bankroll_display(free_bankroll, settings.min_free_bankroll),
+            )
 
             console.clear()
             console.print(table)
@@ -58,3 +70,20 @@ def status(watch: bool):
         while True:
             time.sleep(5)
             render()
+
+
+def _colorize_pnl(pnl: Decimal) -> str:
+    val = float(pnl)
+    if val > 0:
+        return f"[green]${val:+,.2f}[/green]"
+    if val < 0:
+        return f"[red]${val:+,.2f}[/red]"
+    return f"${val:+,.2f}"
+
+
+def _free_bankroll_display(free: Decimal, floor: float) -> str:
+    val = float(free)
+    formatted = f"${val:,.2f}"
+    if val < floor:
+        return f"[red]{formatted} (below ${floor:.2f} floor — no new trades)[/red]"
+    return formatted
