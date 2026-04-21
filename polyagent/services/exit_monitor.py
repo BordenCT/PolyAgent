@@ -18,11 +18,13 @@ class ExitMonitorService:
         volume_multiplier: float = 3.0,
         stale_hours: float = 24.0,
         stale_threshold: float = 0.02,
+        resolved_no_threshold: float = 0.005,
     ) -> None:
         self._target_pct = target_pct
         self._volume_multiplier = volume_multiplier
         self._stale_hours = stale_hours
         self._stale_threshold = stale_threshold
+        self._resolved_no_threshold = resolved_no_threshold
 
     @property
     def target_pct(self) -> float:
@@ -49,10 +51,20 @@ class ExitMonitorService:
         avg_volume_10min: float,
         hours_since_entry: float,
     ) -> ExitReason | None:
-        """Check all 3 exit triggers. Returns reason or None.
+        """Check all 4 exit triggers. Returns reason or None.
 
-        Trigger priority: TARGET_HIT > VOLUME_EXIT > STALE_THESIS
+        Trigger priority: TARGET_HIT > RESOLVED_NO > VOLUME_EXIT > STALE_THESIS
         """
+        # 0. Market resolved NO — price near zero means the bet lost; close immediately
+        # (STALE_THESIS wouldn't catch this because 100% price drop exceeds stale_threshold)
+        if float(current_price) <= self._resolved_no_threshold and float(entry_price) > self._resolved_no_threshold:
+            logger.info(
+                "RESOLVED_NO: current=%.4f <= %.4f threshold",
+                float(current_price),
+                self._resolved_no_threshold,
+            )
+            return ExitReason.RESOLVED_NO
+
         # 1. Target hit — 85% of expected move captured
         expected_gap = float(target_price - entry_price)
         if expected_gap > 0:
