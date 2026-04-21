@@ -92,6 +92,8 @@ def run() -> None:
         min_depth=settings.min_depth,
         min_hours=settings.min_hours,
         max_hours=settings.max_hours,
+        min_price=settings.min_price,
+        max_price=settings.max_price,
     )
     brain = BrainService(
         llm_evaluator=brain_evaluator,

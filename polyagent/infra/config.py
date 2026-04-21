@@ -41,6 +41,8 @@ class Settings:
     min_depth: float
     min_hours: float
     max_hours: float
+    min_price: float
+    max_price: float
     anthropic_api_key: str
     brain_confidence_threshold: float
     brain_min_checks: int
@@ -92,6 +94,8 @@ class Settings:
             min_depth=_env_float("MIN_DEPTH", 100.0),
             min_hours=_env_float("MIN_HOURS", 4.0),
             max_hours=_env_float("MAX_HOURS", 168.0),
+            min_price=_env_float("MIN_PRICE", 0.02),
+            max_price=_env_float("MAX_PRICE", 0.98),
             anthropic_api_key=_env_str("ANTHROPIC_API_KEY", ""),
             brain_confidence_threshold=_env_float("BRAIN_CONFIDENCE_THRESHOLD", 0.75),
             brain_min_checks=_env_int("BRAIN_MIN_CHECKS", 3),
