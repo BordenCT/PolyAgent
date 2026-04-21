@@ -67,19 +67,42 @@ class OllamaClient:
         whale_activity: str,
     ) -> dict:
         """Full 4-check market evaluation via Ollama. Matches ClaudeClient interface."""
+        has_rag = bool(rag_context) and "No similar historical markets" not in rag_context
+        has_whale = bool(whale_activity) and "No whale activity" not in whale_activity
+
         prompt = (
-            "You are an expert prediction market analyst. Evaluate this market "
-            "and run 4 checks. Return ONLY valid JSON.\n\n"
-            "The 4 checks:\n"
-            "1. base_rate — Does historical data support this outcome?\n"
-            "2. news — Has anything changed recently that affects this market?\n"
-            "3. whale — Are high-performing wallets active in this market?\n"
-            "4. disposition — Is the crowd making a cognitive error?\n\n"
+            "You are an expert prediction market analyst. Your job is to estimate the "
+            "probability of YES for the market below and decide whether there is an edge "
+            "versus the current market price.\n\n"
+            "Return ONLY valid JSON with four boolean 'red-flag' checks, a probability, "
+            "a confidence, and a short thesis.\n\n"
+            "Check semantics (true = NO red flag, safe to proceed; false = red flag found):\n"
+            "  - base_rate: true unless general knowledge of similar events clearly "
+            "contradicts the direction implied by the price.\n"
+            "  - news: true unless you are aware of recent news that clearly invalidates "
+            "the direction implied by the price. Absence of news evidence = true.\n"
+            "  - whale: true unless provided whale data contradicts the position. "
+            "Absence of whale data = true.\n"
+            "  - disposition: true if you see a plausible cognitive error or mispricing "
+            "(anchoring, recency, availability, extreme pricing without justification). "
+            "Otherwise false.\n\n"
+            "Confidence rules:\n"
+            "  - Confidence reflects how sure you are of YOUR probability estimate given the "
+            "question and market price. It must NOT be penalized for missing news/whale/"
+            "historical data.\n"
+            "  - If the question is clear and the price looks obviously mispriced relative "
+            "to common-sense priors, confidence should be >= 0.75.\n"
+            "  - Only go below 0.60 if the question itself is genuinely ambiguous or the "
+            "price seems defensible.\n\n"
             f"Question: {question}\n"
-            f"Current market price: {market_price:.4f}\n\n"
-            f"Historical Context:\n{rag_context}\n\n"
-            f"Whale Activity:\n{whale_activity}\n\n"
-            'Return ONLY JSON: {"base_rate": true/false, "news": true/false, '
+            f"Current market price (YES): {market_price:.4f}\n"
+        )
+        if has_rag:
+            prompt += f"\nHistorical Context:\n{rag_context}\n"
+        if has_whale:
+            prompt += f"\nWhale Activity:\n{whale_activity}\n"
+        prompt += (
+            '\nReturn ONLY JSON: {"base_rate": true/false, "news": true/false, '
             '"whale": true/false, "disposition": true/false, '
             '"probability": 0.XX, "confidence": 0.XX, '
             '"thesis": "your 1-2 sentence thesis"}'
