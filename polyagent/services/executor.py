@@ -79,16 +79,27 @@ class ExecutorService:
         f_capped = min(f_star, self._kelly_max_fraction)
         return round(bankroll * f_capped, 2)
 
-    def compute_consensus(self, votes: list[Vote]) -> tuple[Consensus, float]:
-        """Compute consensus from strategy votes."""
-        buy_votes = sum(1 for v in votes if v.action == VoteAction.BUY)
+    def compute_consensus(
+        self, votes: list[Vote]
+    ) -> tuple[Consensus, float, PositionSide | None]:
+        """Compute consensus and direction from strategy votes.
 
-        if buy_votes >= 2:
-            return Consensus.FULL, 1.0
-        elif buy_votes == 1:
-            return Consensus.HALF, 0.5
-        else:
-            return Consensus.NONE, 0.0
+        Returns (consensus, fraction, side). Side is None when there's no trade:
+        strategies conflict (BUY count == SELL count) or all HOLD.
+        """
+        buy_votes = sum(1 for v in votes if v.action == VoteAction.BUY)
+        sell_votes = sum(1 for v in votes if v.action == VoteAction.SELL)
+
+        if buy_votes == 0 and sell_votes == 0:
+            return Consensus.NONE, 0.0, None
+        if buy_votes == sell_votes:
+            return Consensus.NONE, 0.0, None
+
+        side = PositionSide.BUY if buy_votes > sell_votes else PositionSide.SELL
+        dominant = max(buy_votes, sell_votes)
+        if dominant >= 2:
+            return Consensus.FULL, 1.0, side
+        return Consensus.HALF, 0.5, side
 
     def plan(
         self,
@@ -103,9 +114,9 @@ class ExecutorService:
             current_bankroll: Running equity for dynamic Kelly sizing. Falls back
                               to the configured bankroll if None.
         """
-        consensus, fraction = self.compute_consensus(votes)
+        consensus, fraction, side = self.compute_consensus(votes)
 
-        if consensus == Consensus.NONE:
+        if consensus == Consensus.NONE or side is None:
             logger.info("SKIP — no consensus for market %s", thesis.market_id)
             return None
 
@@ -114,9 +125,17 @@ class ExecutorService:
         }
         thesis.consensus = consensus
 
+        market_p = float(market_price)
+        if side == PositionSide.BUY:
+            p_win = thesis.claude_estimate
+            bet_price = market_p
+        else:  # SELL = long NO
+            p_win = 1.0 - thesis.claude_estimate
+            bet_price = 1.0 - market_p
+
         kelly_amount = self.kelly_size(
-            p_win=thesis.claude_estimate,
-            market_price=float(market_price),
+            p_win=p_win,
+            market_price=bet_price,
             bankroll=current_bankroll,
         )
         position_size = round(kelly_amount * fraction, 2)
@@ -125,15 +144,17 @@ class ExecutorService:
             logger.info("SKIP — Kelly says no edge for market %s", thesis.market_id)
             return None
 
-        expected_gap = thesis.claude_estimate - float(market_price)
-        target_price = float(market_price) + (expected_gap * 0.85)
+        # Target price tracked in YES coordinates so exit_monitor and status work uniformly.
+        # For SELL, the expected move is negative (YES price should fall toward estimate).
+        expected_gap = thesis.claude_estimate - market_p
+        target_price = market_p + (expected_gap * 0.85)
 
         effective_bankroll = current_bankroll if current_bankroll is not None else self._bankroll
         kelly_fraction = round(kelly_amount / effective_bankroll, 4) if effective_bankroll > 0 else 0.0
 
         return TradePlan(
             consensus=consensus,
-            side=PositionSide.BUY,
+            side=side,
             market_price=market_price,
             target_price=Decimal(str(round(target_price, 4))),
             kelly_fraction=kelly_fraction,

@@ -26,6 +26,7 @@ class ExitReason(StrEnum):
     VOLUME_EXIT = "VOLUME_EXIT"
     STALE_THESIS = "STALE_THESIS"
     RESOLVED_NO = "RESOLVED_NO"
+    RESOLVED_YES = "RESOLVED_YES"
 
 class VoteAction(StrEnum):
     BUY = "BUY"

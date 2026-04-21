@@ -51,29 +51,49 @@ class ExitMonitorService:
         avg_volume_10min: float,
         hours_since_entry: float,
     ) -> ExitReason | None:
-        """Check all 4 exit triggers. Returns reason or None.
+        """Check all exit triggers. Returns reason or None.
 
-        Trigger priority: TARGET_HIT > RESOLVED_NO > VOLUME_EXIT > STALE_THESIS
+        All prices are YES-coord: entry_price and current_price track the YES
+        outcome price so BUY (long YES) and SELL (long NO) share the same
+        monitoring logic — direction is inferred from target vs entry.
+
+        Trigger priority: TARGET_HIT > RESOLVED_YES/NO > VOLUME_EXIT > STALE_THESIS
         """
-        # 0. Market resolved NO — price near zero means the bet lost; close immediately
-        # (STALE_THESIS wouldn't catch this because 100% price drop exceeds stale_threshold)
-        if float(current_price) <= self._resolved_no_threshold and float(entry_price) > self._resolved_no_threshold:
+        current = float(current_price)
+        entry = float(entry_price)
+
+        # 0a. YES resolved — price pinned near 1.0
+        high_cutoff = 1.0 - self._resolved_no_threshold
+        if current >= high_cutoff and entry < high_cutoff:
+            logger.info(
+                "RESOLVED_YES: current=%.4f >= %.4f threshold",
+                current, high_cutoff,
+            )
+            return ExitReason.RESOLVED_YES
+        # 0b. NO resolved — price pinned near 0.0
+        if current <= self._resolved_no_threshold and entry > self._resolved_no_threshold:
             logger.info(
                 "RESOLVED_NO: current=%.4f <= %.4f threshold",
-                float(current_price),
-                self._resolved_no_threshold,
+                current, self._resolved_no_threshold,
             )
             return ExitReason.RESOLVED_NO
 
-        # 1. Target hit — 85% of expected move captured
+        # 1. Target hit — 85% of expected move captured (direction-aware)
         expected_gap = float(target_price - entry_price)
-        if expected_gap > 0:
-            threshold = float(entry_price) + (expected_gap * self._target_pct)
-            if float(current_price) >= threshold:
+        if expected_gap > 0:  # BUY: YES should rise toward target
+            threshold = entry + (expected_gap * self._target_pct)
+            if current >= threshold:
                 logger.info(
-                    "TARGET_HIT: current=%.4f >= threshold=%.4f",
-                    float(current_price),
-                    threshold,
+                    "TARGET_HIT (BUY): current=%.4f >= threshold=%.4f",
+                    current, threshold,
+                )
+                return ExitReason.TARGET_HIT
+        elif expected_gap < 0:  # SELL: YES should fall toward target
+            threshold = entry + (expected_gap * self._target_pct)
+            if current <= threshold:
+                logger.info(
+                    "TARGET_HIT (SELL): current=%.4f <= threshold=%.4f",
+                    current, threshold,
                 )
                 return ExitReason.TARGET_HIT
 
@@ -108,9 +128,22 @@ class ExitMonitorService:
         position_size: Decimal,
         side: str,
     ) -> Decimal:
-        """Calculate realized P&L for a closed position."""
+        """Calculate realized P&L for a closed position.
+
+        All prices are in YES coordinates. For SELL (long NO), the bettor paid
+        (1 - entry_yes) per share, so the denominator is (1 - entry_yes), not
+        entry_yes. Using entry_yes would over-report gains when entry YES < 0.5.
+        """
+        entry = Decimal(str(entry_price))
+        exit_p = Decimal(str(exit_price))
+        size = Decimal(str(position_size))
         if side == "BUY":
-            pct_change = (exit_price - entry_price) / entry_price
-        else:
-            pct_change = (entry_price - exit_price) / entry_price
-        return (pct_change * position_size).quantize(Decimal("0.01"))
+            if entry == 0:
+                return Decimal("0")
+            pct_change = (exit_p - entry) / entry
+        else:  # SELL = long NO; cost basis = (1 - entry_yes)
+            denom = Decimal("1") - entry
+            if denom == 0:
+                return Decimal("0")
+            pct_change = (entry - exit_p) / denom
+        return (pct_change * size).quantize(Decimal("0.01"))

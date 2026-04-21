@@ -96,3 +96,50 @@ class TestExitMonitor:
         )
         # (0.55 - 0.40) / 0.40 * 100 = $37.50
         assert pnl == Decimal("37.50")
+
+    def test_calculate_pnl_sell_win(self):
+        """Long NO at entry YES=0.40 (so NO cost basis = 0.60). Market resolves NO
+        → YES exit ~ 0.00 → NO worth $1. Gain per share = (1-0.60)/0.60 = 66.67%."""
+        pnl = self.monitor.calculate_pnl(
+            entry_price=Decimal("0.40"),
+            exit_price=Decimal("0.00"),
+            position_size=Decimal("100"),
+            side="SELL",
+        )
+        # (0.40 - 0.00) / (1 - 0.40) * 100 = $66.67
+        assert pnl == Decimal("66.67")
+
+    def test_calculate_pnl_sell_loss(self):
+        """Long NO at entry YES=0.40. Market resolves YES (bad for us) → exit 1.00.
+        Loss = 100% of position_size."""
+        pnl = self.monitor.calculate_pnl(
+            entry_price=Decimal("0.40"),
+            exit_price=Decimal("1.00"),
+            position_size=Decimal("100"),
+            side="SELL",
+        )
+        # (0.40 - 1.00) / (1 - 0.40) * 100 = -$100.00
+        assert pnl == Decimal("-100.00")
+
+    def test_sell_target_hit(self):
+        """SELL position: target below entry, fires when current <= threshold."""
+        result = self.monitor.check_exit(
+            entry_price=Decimal("0.40"),
+            target_price=Decimal("0.15"),  # want YES to fall
+            current_price=Decimal("0.18"),  # fell most of the way
+            volume_10min=100.0,
+            avg_volume_10min=100.0,
+            hours_since_entry=4.0,
+        )
+        assert result == ExitReason.TARGET_HIT
+
+    def test_resolved_yes_trigger(self):
+        result = self.monitor.check_exit(
+            entry_price=Decimal("0.40"),
+            target_price=Decimal("0.15"),
+            current_price=Decimal("0.998"),  # YES resolved
+            volume_10min=100.0,
+            avg_volume_10min=100.0,
+            hours_since_entry=4.0,
+        )
+        assert result == ExitReason.RESOLVED_YES

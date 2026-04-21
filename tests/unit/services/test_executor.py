@@ -65,7 +65,7 @@ class TestConsensus:
             Vote(action=VoteAction.BUY, confidence=0.7, reason="conv"),
             Vote(action=VoteAction.HOLD, confidence=0.3, reason="whale"),
         ]
-        consensus, fraction = self.executor.compute_consensus(votes)
+        consensus, fraction, _side = self.executor.compute_consensus(votes)
         assert consensus == Consensus.FULL
         assert fraction == 1.0
 
@@ -75,7 +75,7 @@ class TestConsensus:
             Vote(action=VoteAction.HOLD, confidence=0.3, reason="conv"),
             Vote(action=VoteAction.HOLD, confidence=0.2, reason="whale"),
         ]
-        consensus, fraction = self.executor.compute_consensus(votes)
+        consensus, fraction, _side = self.executor.compute_consensus(votes)
         assert consensus == Consensus.HALF
         assert fraction == 0.5
 
@@ -85,7 +85,7 @@ class TestConsensus:
             Vote(action=VoteAction.HOLD, confidence=0.2, reason="conv"),
             Vote(action=VoteAction.HOLD, confidence=0.1, reason="whale"),
         ]
-        consensus, fraction = self.executor.compute_consensus(votes)
+        consensus, fraction, _side = self.executor.compute_consensus(votes)
         assert consensus == Consensus.NONE
         assert fraction == 0.0
 
@@ -95,7 +95,7 @@ class TestConsensus:
             Vote(action=VoteAction.BUY, confidence=0.8, reason="conv"),
             Vote(action=VoteAction.BUY, confidence=0.7, reason="whale"),
         ]
-        consensus, fraction = self.executor.compute_consensus(votes)
+        consensus, fraction, _side = self.executor.compute_consensus(votes)
         assert consensus == Consensus.FULL
         assert fraction == 1.0
 
@@ -147,3 +147,30 @@ class TestExecute:
             market_price=Decimal("0.65"),
         )
         assert position is None
+
+    def test_execute_sell_when_model_below_market(self):
+        """Model p=0.10 vs market 0.40 — edge says buy NO at $0.60."""
+        thesis = self._make_thesis(estimate=0.10)
+        votes = [
+            Vote(action=VoteAction.SELL, confidence=0.8, reason="conv"),
+            Vote(action=VoteAction.HOLD, confidence=0.0, reason="arb"),
+            Vote(action=VoteAction.HOLD, confidence=0.0, reason="whale"),
+        ]
+        position = self.executor.execute(
+            thesis=thesis,
+            votes=votes,
+            market_price=Decimal("0.40"),
+        )
+        assert position is not None
+        assert position.side == PositionSide.SELL
+        assert float(position.position_size) > 0
+
+    def test_conflicting_votes_skip(self):
+        votes = [
+            Vote(action=VoteAction.BUY, confidence=0.5, reason="conv"),
+            Vote(action=VoteAction.SELL, confidence=0.5, reason="arb"),
+            Vote(action=VoteAction.HOLD, confidence=0.0, reason="whale"),
+        ]
+        consensus, fraction, side = self.executor.compute_consensus(votes)
+        assert consensus == Consensus.NONE
+        assert side is None
