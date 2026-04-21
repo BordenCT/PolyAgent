@@ -60,6 +60,10 @@ SELECT_CAPITAL_STATE = """
     FROM positions
 """
 
+SELECT_OPEN_MARKET_IDS = """
+    SELECT DISTINCT market_id FROM positions WHERE status = 'open'
+"""
+
 
 class PositionRepository:
     """CRUD operations for the positions table."""
@@ -125,6 +129,12 @@ class PositionRepository:
         """Update a position's current price."""
         with self._db.cursor() as cur:
             cur.execute(UPDATE_CURRENT_PRICE, {"id": position_id, "current_price": current_price})
+
+    def get_open_market_ids(self) -> set[UUID]:
+        """Return the set of market UUIDs with at least one open position."""
+        with self._db.cursor() as cur:
+            cur.execute(SELECT_OPEN_MARKET_IDS)
+            return {row["market_id"] for row in cur.fetchall()}
 
     def get_capital_state(self) -> tuple[Decimal, Decimal]:
         """Return (open_capital, realized_pnl) summed over the positions table.

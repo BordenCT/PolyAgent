@@ -133,10 +133,17 @@ def run() -> None:
                     estimates = {}  # scanner falls back to 0.5 neutral prior per market
                 survivors = scanner.scan_batch(markets, estimates)
 
+                open_market_ids = position_repo.get_open_market_ids()
+                skipped = 0
                 for market, score in survivors:
                     db_id = market_repo.upsert(market, MarketStatus.QUEUED)
+                    if db_id in open_market_ids:
+                        skipped += 1
+                        continue
                     market_repo.update_score(db_id, score, MarketStatus.QUEUED)
                     queues.scan_queue.put(ScanResult(market=market, market_db_id=db_id, score=score))
+                if skipped:
+                    logger.info("Skipped %d markets already holding open positions", skipped)
 
                 logger.info("Scan cycle complete. Sleeping %dh", settings.scan_interval_hours)
                 time.sleep(settings.scan_interval_hours * 3600)
