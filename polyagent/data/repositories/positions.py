@@ -53,6 +53,13 @@ UPDATE_CURRENT_PRICE = """
     UPDATE positions SET current_price = %(current_price)s WHERE id = %(id)s
 """
 
+SELECT_CAPITAL_STATE = """
+    SELECT
+        COALESCE(SUM(position_size) FILTER (WHERE status = 'open'), 0) AS open_capital,
+        COALESCE(SUM(pnl) FILTER (WHERE status = 'closed'), 0) AS realized_pnl
+    FROM positions
+"""
+
 
 class PositionRepository:
     """CRUD operations for the positions table."""
@@ -118,3 +125,16 @@ class PositionRepository:
         """Update a position's current price."""
         with self._db.cursor() as cur:
             cur.execute(UPDATE_CURRENT_PRICE, {"id": position_id, "current_price": current_price})
+
+    def get_capital_state(self) -> tuple[Decimal, Decimal]:
+        """Return (open_capital, realized_pnl) summed over the positions table.
+
+        open_capital = sum(position_size) over open positions — capital currently tied up.
+        realized_pnl = sum(pnl) over closed positions — cumulative gains/losses.
+        """
+        with self._db.cursor() as cur:
+            cur.execute(SELECT_CAPITAL_STATE)
+            row = cur.fetchone()
+            if row is None:
+                return Decimal("0"), Decimal("0")
+            return Decimal(str(row["open_capital"])), Decimal(str(row["realized_pnl"]))

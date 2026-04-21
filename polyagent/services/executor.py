@@ -146,9 +146,10 @@ class ExecutorService:
         votes: list[Vote],
         market_price: Decimal,
         volume_at_entry: Decimal = Decimal("0"),
+        current_bankroll: float | None = None,
     ) -> Position | None:
         """Plan and open a paper position. Returns None if no trade is taken."""
-        plan = self.plan(thesis, votes, market_price)
+        plan = self.plan(thesis, votes, market_price, current_bankroll=current_bankroll)
         if plan is None:
             return None
 
@@ -178,6 +179,7 @@ class ExecutorService:
         market: MarketData,
         polymarket_client: "PolymarketClient",
         trade_log: "TradeLogRepository | None" = None,
+        current_bankroll: float | None = None,
     ) -> Position | None:
         """Plan, place a real order via the CLOB, and return the opened position.
 
@@ -185,7 +187,7 @@ class ExecutorService:
         On placement failure, the attempt is recorded to trade_log (if provided)
         against a synthesized position ID so the error is auditable.
         """
-        plan = self.plan(thesis, votes, market.midpoint_price)
+        plan = self.plan(thesis, votes, market.midpoint_price, current_bankroll=current_bankroll)
         if plan is None:
             return None
 

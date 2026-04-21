@@ -186,6 +186,21 @@ def run() -> None:
                         )
                     votes.append(vote)
 
+                open_capital, realized_pnl = position_repo.get_capital_state()
+                free_bankroll = float(Decimal(str(settings.bankroll)) + realized_pnl - open_capital)
+                if free_bankroll < settings.min_free_bankroll:
+                    logger.info(
+                        "SKIP %s — free bankroll $%.2f below $%.2f floor (open=$%.2f, pnl=$%.2f)",
+                        thesis.market_id,
+                        free_bankroll,
+                        settings.min_free_bankroll,
+                        float(open_capital),
+                        float(realized_pnl),
+                    )
+                    market_repo.update_status(thesis.market_id, MarketStatus.REJECTED)
+                    queues.thesis_queue.task_done()
+                    continue
+
                 if live_enabled:
                     position = executor.execute_live(
                         thesis=thesis,
@@ -193,6 +208,7 @@ def run() -> None:
                         market=market,
                         polymarket_client=polymarket,
                         trade_log=trade_log_repo,
+                        current_bankroll=free_bankroll,
                     )
                 else:
                     position = executor.execute(
@@ -200,6 +216,7 @@ def run() -> None:
                         votes=votes,
                         market_price=market.midpoint_price,
                         volume_at_entry=market.volume_24h,
+                        current_bankroll=free_bankroll,
                     )
 
                 if position:
