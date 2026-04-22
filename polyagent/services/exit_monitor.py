@@ -68,10 +68,10 @@ class ExitMonitorService:
         """
         current = float(current_price)
         entry = float(entry_price)
+        high_cutoff = 1.0 - self._resolved_no_threshold
 
         if is_resolved:
             # 0a. YES resolved — price pinned near 1.0
-            high_cutoff = 1.0 - self._resolved_no_threshold
             if current >= high_cutoff and entry < high_cutoff:
                 logger.info(
                     "RESOLVED_YES: current=%.4f >= %.4f threshold",
@@ -86,34 +86,43 @@ class ExitMonitorService:
                 )
                 return ExitReason.RESOLVED_NO
 
-        # 1. Target hit — 85% of expected move captured (direction-aware)
-        expected_gap = float(target_price - entry_price)
-        if expected_gap > 0:  # BUY: YES should rise toward target
-            threshold = entry + (expected_gap * self._target_pct)
-            if current >= threshold:
-                logger.info(
-                    "TARGET_HIT (BUY): current=%.4f >= threshold=%.4f",
-                    current, threshold,
-                )
-                return ExitReason.TARGET_HIT
-        elif expected_gap < 0:  # SELL: YES should fall toward target
-            threshold = entry + (expected_gap * self._target_pct)
-            if current <= threshold:
-                logger.info(
-                    "TARGET_HIT (SELL): current=%.4f <= threshold=%.4f",
-                    current, threshold,
-                )
-                return ExitReason.TARGET_HIT
+        # Book at either extreme without a resolution flag is almost always a
+        # thin/empty book, not a legitimate price. Skip every price-based
+        # trigger (TARGET_HIT, VOLUME_EXIT). Let STALE_THESIS handle eventual
+        # cleanup if it really is stuck.
+        book_untrusted = (not is_resolved) and (
+            current <= self._resolved_no_threshold or current >= high_cutoff
+        )
 
-        # 2. Volume spike — 3x normal = smart money leaving
-        if avg_volume_10min > 0 and volume_10min > avg_volume_10min * self._volume_multiplier:
-            logger.info(
-                "VOLUME_EXIT: vol_10m=%.0f > %.0f (%.1fx avg)",
-                volume_10min,
-                avg_volume_10min * self._volume_multiplier,
-                volume_10min / avg_volume_10min,
-            )
-            return ExitReason.VOLUME_EXIT
+        if not book_untrusted:
+            # 1. Target hit — 85% of expected move captured (direction-aware)
+            expected_gap = float(target_price - entry_price)
+            if expected_gap > 0:  # BUY: YES should rise toward target
+                threshold = entry + (expected_gap * self._target_pct)
+                if current >= threshold:
+                    logger.info(
+                        "TARGET_HIT (BUY): current=%.4f >= threshold=%.4f",
+                        current, threshold,
+                    )
+                    return ExitReason.TARGET_HIT
+            elif expected_gap < 0:  # SELL: YES should fall toward target
+                threshold = entry + (expected_gap * self._target_pct)
+                if current <= threshold:
+                    logger.info(
+                        "TARGET_HIT (SELL): current=%.4f <= threshold=%.4f",
+                        current, threshold,
+                    )
+                    return ExitReason.TARGET_HIT
+
+            # 2. Volume spike — 3x normal = smart money leaving
+            if avg_volume_10min > 0 and volume_10min > avg_volume_10min * self._volume_multiplier:
+                logger.info(
+                    "VOLUME_EXIT: vol_10m=%.0f > %.0f (%.1fx avg)",
+                    volume_10min,
+                    avg_volume_10min * self._volume_multiplier,
+                    volume_10min / avg_volume_10min,
+                )
+                return ExitReason.VOLUME_EXIT
 
         # 3. Time decay — thesis stale after 24h with < 2% price movement
         if hours_since_entry > self._stale_hours:

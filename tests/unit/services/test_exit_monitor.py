@@ -159,6 +159,33 @@ class TestExitMonitor:
         )
         assert result is None
 
+    def test_empty_book_does_not_fire_target_hit_on_sell(self):
+        """SELL position: target well below entry, but current=0.00 is empty
+        book, not a real price — TARGET_HIT must not fire."""
+        result = self.monitor.check_exit(
+            entry_price=Decimal("0.0815"),
+            target_price=Decimal("0.02"),
+            current_price=Decimal("0.00"),
+            volume_10min=100.0,
+            avg_volume_10min=100.0,
+            hours_since_entry=4.0,
+            is_resolved=False,
+        )
+        assert result is None
+
+    def test_empty_book_still_allows_stale_thesis(self):
+        """STALE should still fire after 24h even with untrusted book."""
+        result = self.monitor.check_exit(
+            entry_price=Decimal("0.40"),
+            target_price=Decimal("0.60"),
+            current_price=Decimal("0.404"),  # small drift
+            volume_10min=100.0,
+            avg_volume_10min=100.0,
+            hours_since_entry=30.0,
+            is_resolved=False,
+        )
+        assert result == ExitReason.STALE_THESIS
+
     def test_resolved_no_fires_only_when_flag_set(self):
         result = self.monitor.check_exit(
             entry_price=Decimal("0.40"),

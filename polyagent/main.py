@@ -279,7 +279,10 @@ def run() -> None:
                     current_volume = float(snapshot["volume_24h"]) if snapshot else float(pos.get("volume_at_entry") or 0)
                     is_resolved = bool(snapshot["is_resolved"]) if snapshot else False
 
-                    if snapshot and current_price != pos["current_price"]:
+                    # Don't persist zero-midpoint readings unless the market is
+                    # actually resolved — thin books produce spurious zeros.
+                    zero_like = float(current_price) <= exit_monitor._resolved_no_threshold
+                    if snapshot and current_price != pos["current_price"] and (is_resolved or not zero_like):
                         position_repo.update_price(pos["id"], current_price)
 
                     hours_since_entry = _hours_since(pos["opened_at"])
