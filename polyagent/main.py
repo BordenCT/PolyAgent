@@ -168,6 +168,13 @@ def run() -> None:
         while queues.shutdown.empty():
             try:
                 scan_result = queues.scan_queue.get(timeout=30)
+                # Back-to-back scan cycles can queue the same market multiple
+                # times. Re-check at dequeue to avoid evaluating a market that
+                # another worker already opened a position on.
+                if scan_result.market_db_id in position_repo.get_open_market_ids():
+                    market_repo.update_status(scan_result.market_db_id, MarketStatus.TRADED)
+                    queues.scan_queue.task_done()
+                    continue
                 thesis = brain.evaluate(scan_result.market, scan_result.market_db_id)
                 if thesis:
                     thesis_repo.insert(thesis)
@@ -186,6 +193,17 @@ def run() -> None:
             try:
                 item = queues.thesis_queue.get(timeout=30)
                 thesis, market = item.thesis, item.market
+
+                # Final dedup guard — a position may have been opened on this
+                # market between the brain's check and now.
+                if thesis.market_id in position_repo.get_open_market_ids():
+                    logger.info(
+                        "SKIP %s — already holding an open position on this market",
+                        thesis.market_id,
+                    )
+                    market_repo.update_status(thesis.market_id, MarketStatus.TRADED)
+                    queues.thesis_queue.task_done()
+                    continue
 
                 votes = []
                 for strategy in strategies:
