@@ -64,6 +64,13 @@ SELECT_OPEN_MARKET_IDS = """
     SELECT DISTINCT market_id FROM positions WHERE status = 'open'
 """
 
+SELECT_RECENTLY_CLOSED_MARKET_IDS = """
+    SELECT DISTINCT market_id
+    FROM positions
+    WHERE status = 'closed'
+      AND closed_at > NOW() - make_interval(hours => %(hours)s)
+"""
+
 
 class PositionRepository:
     """CRUD operations for the positions table."""
@@ -134,6 +141,17 @@ class PositionRepository:
         """Return the set of market UUIDs with at least one open position."""
         with self._db.cursor() as cur:
             cur.execute(SELECT_OPEN_MARKET_IDS)
+            return {row["market_id"] for row in cur.fetchall()}
+
+    def get_recently_closed_market_ids(self, hours: float) -> set[UUID]:
+        """Return market UUIDs whose last position closed within the last `hours`.
+
+        Used by the scanner to cool off on markets that just resolved (or that
+        may have closed spuriously) so we don't instantly re-enter the same
+        trade before resolution truly settles.
+        """
+        with self._db.cursor() as cur:
+            cur.execute(SELECT_RECENTLY_CLOSED_MARKET_IDS, {"hours": float(hours)})
             return {row["market_id"] for row in cur.fetchall()}
 
     def get_capital_state(self) -> tuple[Decimal, Decimal]:

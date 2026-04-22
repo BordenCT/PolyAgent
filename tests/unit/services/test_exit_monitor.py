@@ -141,5 +141,32 @@ class TestExitMonitor:
             volume_10min=100.0,
             avg_volume_10min=100.0,
             hours_since_entry=4.0,
+            is_resolved=True,
         )
         assert result == ExitReason.RESOLVED_YES
+
+    def test_empty_book_zero_price_does_not_fire_resolved_no(self):
+        """Without is_resolved=True, a zero price is treated as a thin book,
+        not a resolved market — prevents spurious close + re-entry loops."""
+        result = self.monitor.check_exit(
+            entry_price=Decimal("0.40"),
+            target_price=Decimal("0.60"),
+            current_price=Decimal("0.00"),  # empty book
+            volume_10min=100.0,
+            avg_volume_10min=100.0,
+            hours_since_entry=4.0,
+            is_resolved=False,
+        )
+        assert result is None
+
+    def test_resolved_no_fires_only_when_flag_set(self):
+        result = self.monitor.check_exit(
+            entry_price=Decimal("0.40"),
+            target_price=Decimal("0.60"),
+            current_price=Decimal("0.002"),
+            volume_10min=100.0,
+            avg_volume_10min=100.0,
+            hours_since_entry=4.0,
+            is_resolved=True,
+        )
+        assert result == ExitReason.RESOLVED_NO

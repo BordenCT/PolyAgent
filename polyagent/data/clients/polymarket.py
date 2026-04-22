@@ -134,16 +134,18 @@ class PolymarketClient:
         return {}
 
     def fetch_market_state(self, condition_id: str) -> dict | None:
-        """Fetch a fresh price + 24h volume snapshot for one market.
+        """Fetch a fresh price + volume + resolution snapshot for one market.
 
-        Used by the exit monitor to refresh current_price and detect volume spikes.
+        Used by the exit monitor to refresh current_price and decide whether a
+        zero price means "market resolved NO" vs "book is temporarily empty".
         Retries once after a back-off on 429 (rate limit).
 
         Args:
             condition_id: Polymarket market condition id.
 
         Returns:
-            Dict with keys 'midpoint_price' and 'volume_24h', or None on failure.
+            Dict with keys 'midpoint_price', 'volume_24h', 'is_resolved',
+            or None on failure.
         """
         for attempt in range(2):
             try:
@@ -153,9 +155,18 @@ class PolymarketClient:
                 best_bid = float(raw.get("best_bid", 0) or 0)
                 best_ask = float(raw.get("best_ask", 0) or 0)
                 midpoint = (best_bid + best_ask) / 2 if best_bid and best_ask else best_bid or best_ask
+
+                # Multiple signals can indicate resolution; require at least one
+                # explicit flag from the CLOB to avoid treating thin books as
+                # resolved markets. `closed` and `archived` are authoritative;
+                # `accepting_orders=false` alone is not (pre-open markets show
+                # this too).
+                is_resolved = bool(raw.get("closed")) or bool(raw.get("archived"))
+
                 return {
                     "midpoint_price": Decimal(str(round(midpoint, 4))),
                     "volume_24h": Decimal(str(raw.get("volume", 0) or 0)),
+                    "is_resolved": is_resolved,
                 }
             except httpx.HTTPStatusError as e:
                 if e.response.status_code == 429 and attempt == 0:

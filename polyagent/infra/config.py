@@ -50,6 +50,7 @@ class Settings:
     kelly_max_fraction: float
     bankroll: float
     min_free_bankroll: float
+    market_cooldown_hours: float
     exit_target_pct: float
     exit_volume_multiplier: float
     exit_stale_hours: float
@@ -103,6 +104,7 @@ class Settings:
             kelly_max_fraction=_env_float("KELLY_MAX_FRACTION", 0.25),
             bankroll=_env_float("BANKROLL", 800.0),
             min_free_bankroll=_env_float("MIN_FREE_BANKROLL", 1.0),
+            market_cooldown_hours=_env_float("MARKET_COOLDOWN_HOURS", 24.0),
             exit_target_pct=_env_float("EXIT_TARGET_PCT", 0.85),
             exit_volume_multiplier=_env_float("EXIT_VOLUME_MULTIPLIER", 3.0),
             exit_stale_hours=_env_float("EXIT_STALE_HOURS", 24.0),

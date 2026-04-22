@@ -50,6 +50,7 @@ class ExitMonitorService:
         volume_10min: float,
         avg_volume_10min: float,
         hours_since_entry: float,
+        is_resolved: bool = False,
     ) -> ExitReason | None:
         """Check all exit triggers. Returns reason or None.
 
@@ -57,26 +58,33 @@ class ExitMonitorService:
         outcome price so BUY (long YES) and SELL (long NO) share the same
         monitoring logic — direction is inferred from target vs entry.
 
+        is_resolved MUST come from an authoritative source (CLOB's closed/
+        archived flag). A midpoint near 0 or 1 alone is not enough — thin or
+        briefly empty order books push midpoint to 0 without the market being
+        resolved, and an early RESOLVED_NO close then lets the scanner re-enter
+        the same market on the next sweep.
+
         Trigger priority: TARGET_HIT > RESOLVED_YES/NO > VOLUME_EXIT > STALE_THESIS
         """
         current = float(current_price)
         entry = float(entry_price)
 
-        # 0a. YES resolved — price pinned near 1.0
-        high_cutoff = 1.0 - self._resolved_no_threshold
-        if current >= high_cutoff and entry < high_cutoff:
-            logger.info(
-                "RESOLVED_YES: current=%.4f >= %.4f threshold",
-                current, high_cutoff,
-            )
-            return ExitReason.RESOLVED_YES
-        # 0b. NO resolved — price pinned near 0.0
-        if current <= self._resolved_no_threshold and entry > self._resolved_no_threshold:
-            logger.info(
-                "RESOLVED_NO: current=%.4f <= %.4f threshold",
-                current, self._resolved_no_threshold,
-            )
-            return ExitReason.RESOLVED_NO
+        if is_resolved:
+            # 0a. YES resolved — price pinned near 1.0
+            high_cutoff = 1.0 - self._resolved_no_threshold
+            if current >= high_cutoff and entry < high_cutoff:
+                logger.info(
+                    "RESOLVED_YES: current=%.4f >= %.4f threshold",
+                    current, high_cutoff,
+                )
+                return ExitReason.RESOLVED_YES
+            # 0b. NO resolved — price pinned near 0.0
+            if current <= self._resolved_no_threshold and entry > self._resolved_no_threshold:
+                logger.info(
+                    "RESOLVED_NO: current=%.4f <= %.4f threshold",
+                    current, self._resolved_no_threshold,
+                )
+                return ExitReason.RESOLVED_NO
 
         # 1. Target hit — 85% of expected move captured (direction-aware)
         expected_gap = float(target_price - entry_price)

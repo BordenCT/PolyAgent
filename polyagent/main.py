@@ -136,16 +136,26 @@ def run() -> None:
                 survivors = scanner.scan_batch(markets, estimates)
 
                 open_market_ids = position_repo.get_open_market_ids()
-                skipped = 0
+                cooldown_market_ids = position_repo.get_recently_closed_market_ids(
+                    settings.market_cooldown_hours
+                )
+                skipped_open = 0
+                skipped_cooldown = 0
                 for market, score in survivors:
                     db_id = market_repo.upsert(market, MarketStatus.QUEUED)
                     if db_id in open_market_ids:
-                        skipped += 1
+                        skipped_open += 1
+                        continue
+                    if db_id in cooldown_market_ids:
+                        skipped_cooldown += 1
                         continue
                     market_repo.update_score(db_id, score, MarketStatus.QUEUED)
                     queues.scan_queue.put(ScanResult(market=market, market_db_id=db_id, score=score))
-                if skipped:
-                    logger.info("Skipped %d markets already holding open positions", skipped)
+                if skipped_open or skipped_cooldown:
+                    logger.info(
+                        "Skipped %d markets with open positions, %d in %.0fh cooldown",
+                        skipped_open, skipped_cooldown, settings.market_cooldown_hours,
+                    )
 
                 logger.info("Scan cycle complete. Sleeping %dh", settings.scan_interval_hours)
                 time.sleep(settings.scan_interval_hours * 3600)
@@ -267,6 +277,7 @@ def run() -> None:
                     snapshot = polymarket.fetch_market_state(pos["polymarket_id"])
                     current_price = snapshot["midpoint_price"] if snapshot else pos["current_price"]
                     current_volume = float(snapshot["volume_24h"]) if snapshot else float(pos.get("volume_at_entry") or 0)
+                    is_resolved = bool(snapshot["is_resolved"]) if snapshot else False
 
                     if snapshot and current_price != pos["current_price"]:
                         position_repo.update_price(pos["id"], current_price)
@@ -283,6 +294,7 @@ def run() -> None:
                         volume_10min=current_rate,
                         avg_volume_10min=avg_rate,
                         hours_since_entry=hours_since_entry,
+                        is_resolved=is_resolved,
                     )
                     if reason:
                         pnl = exit_monitor.calculate_pnl(
