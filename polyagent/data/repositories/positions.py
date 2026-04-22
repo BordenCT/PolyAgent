@@ -68,7 +68,7 @@ SELECT_RECENTLY_CLOSED_MARKET_IDS = """
     SELECT DISTINCT market_id
     FROM positions
     WHERE status = 'closed'
-      AND closed_at > NOW() - make_interval(hours => %(hours)s)
+      AND closed_at > NOW() - (%(hours)s * INTERVAL '1 hour')
 """
 
 
