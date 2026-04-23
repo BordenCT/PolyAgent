@@ -1,0 +1,144 @@
+{
+  "nodes": [
+    {
+      "id": "title",
+      "type": "text",
+      "text": "# Market Classifier & Per-Class Analytics\n\nInstrument before blocking. Tag every market with a class, let the data decide.",
+      "x": -520,
+      "y": -520,
+      "width": 620,
+      "height": 140,
+      "color": "4"
+    },
+    {
+      "id": "problem",
+      "type": "text",
+      "text": "## Problem\n\n19 closed paper trades, mostly sports, net slightly negative. All 4 wins are sports SELLs — real edge or noise? We can't tell without per-class data.",
+      "x": -520,
+      "y": -340,
+      "width": 300,
+      "height": 180,
+      "color": "1"
+    },
+    {
+      "id": "goal",
+      "type": "text",
+      "text": "## Goal\n\nLabel every market at scan time and expose per-class P&L/win-rate/hold-time via CLI. No behavioral changes.",
+      "x": -180,
+      "y": -340,
+      "width": 300,
+      "height": 180,
+      "color": "5"
+    },
+    {
+      "id": "scanner",
+      "type": "text",
+      "text": "**Scanner**\n`scan_batch` filters by gap/depth/hours/price. Unchanged.",
+      "x": -520,
+      "y": -100,
+      "width": 260,
+      "height": 100,
+      "color": "3"
+    },
+    {
+      "id": "classifier",
+      "type": "text",
+      "text": "**Classifier (new)**\n`classify(question, category) -> MarketClass`\nPure, never raises, rule cascade:\ncrypto → sports → politics → macro → other",
+      "x": -200,
+      "y": -100,
+      "width": 320,
+      "height": 140,
+      "color": "6"
+    },
+    {
+      "id": "upsert",
+      "type": "text",
+      "text": "**MarketRepository.upsert**\nGains `market_class` column. Refreshed on conflict so rule changes propagate on re-scan.",
+      "x": 180,
+      "y": -100,
+      "width": 300,
+      "height": 120,
+      "color": "3"
+    },
+    {
+      "id": "markets_table",
+      "type": "text",
+      "text": "**markets table**\nNew column `market_class` (ENUM, indexed).\nNo column on positions — join via `market_id`.",
+      "x": 180,
+      "y": 80,
+      "width": 300,
+      "height": 120,
+      "color": "2"
+    },
+    {
+      "id": "backfill",
+      "type": "text",
+      "text": "**Backfill script**\n`polyagent/scripts/backfill_market_class.py`\nIdempotent; rewrites class for all existing markets.",
+      "x": -200,
+      "y": 80,
+      "width": 320,
+      "height": 120,
+      "color": "3"
+    },
+    {
+      "id": "cli",
+      "type": "text",
+      "text": "**CLI: polyagent class-stats**\nJoin positions→markets, GROUP BY class. Rich table: trades, W/L, win%, avg P&L, total P&L, avg hold.",
+      "x": -520,
+      "y": 80,
+      "width": 260,
+      "height": 140,
+      "color": "3"
+    },
+    {
+      "id": "rules",
+      "type": "text",
+      "text": "## Class Rules\n\n**crypto**: bitcoin, btc, eth, solana, xrp, doge, stablecoin, usdc/usdt\n\n**sports**: category=Sports, ` vs. `, `Open:`, `BO3/BO5`, `Spread:`, league tags (MLB/NBA/NHL/NFL/NCAA/UEFA/LCK/LoL/Dota/CS2/Valorant), leagues, 'Will X win on YYYY-MM-DD'\n\n**politics**: category=Politics, president/election/Senate/Congress/Supreme Court/named politicians\n\n**macro**: CPI/Fed/FOMC/inflation/recession/GDP/unemployment/jobs\n\n**other**: default",
+      "x": -520,
+      "y": 260,
+      "width": 480,
+      "height": 280,
+      "color": "6"
+    },
+    {
+      "id": "nongoals",
+      "type": "text",
+      "text": "## Non-Goals\n\n- No blocking or throttling yet\n- No subclass granularity\n- No per-class brain tuning\n- No changes to scanner/executor\n\nData first. Decisions later.",
+      "x": 0,
+      "y": 260,
+      "width": 280,
+      "height": 220,
+      "color": "1"
+    },
+    {
+      "id": "followup",
+      "type": "text",
+      "text": "## Follow-Up (separate specs)\n\n- `BLOCKED_CLASSES` env var\n- Subclass tags (tennis/mlb/esports; btc/eth/sol)\n- Per-class brain prompts\n- Per-class scanner thresholds\n- Retire unused `perf --by-category` flag",
+      "x": 300,
+      "y": 260,
+      "width": 340,
+      "height": 220,
+      "color": "4"
+    },
+    {
+      "id": "rollout",
+      "type": "text",
+      "text": "## Rollout\n\n1. Schema migration (enum + column + index)\n2. Classifier module + unit tests\n3. Repo + scanner wiring + tests\n4. CLI command + tests\n5. Run backfill once\n6. Verify `class-stats`\n\nAdditive, no feature flag required.",
+      "x": 0,
+      "y": 520,
+      "width": 380,
+      "height": 200,
+      "color": "5"
+    }
+  ],
+  "edges": [
+    {"id": "e1", "fromNode": "problem", "fromSide": "right", "toNode": "goal", "toSide": "left"},
+    {"id": "e2", "fromNode": "scanner", "fromSide": "right", "toNode": "classifier", "toSide": "left"},
+    {"id": "e3", "fromNode": "classifier", "fromSide": "right", "toNode": "upsert", "toSide": "left"},
+    {"id": "e4", "fromNode": "upsert", "fromSide": "bottom", "toNode": "markets_table", "toSide": "top"},
+    {"id": "e5", "fromNode": "backfill", "fromSide": "right", "toNode": "markets_table", "toSide": "left"},
+    {"id": "e6", "fromNode": "markets_table", "fromSide": "left", "toNode": "cli", "toSide": "right", "label": "JOIN positions"},
+    {"id": "e7", "fromNode": "classifier", "fromSide": "bottom", "toNode": "rules", "toSide": "top"},
+    {"id": "e8", "fromNode": "cli", "fromSide": "bottom", "toNode": "rollout", "toSide": "left"}
+  ]
+}
