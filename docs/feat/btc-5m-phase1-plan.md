@@ -2,7 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Ship a paper-only BTC 5m worker that scans Polymarket for `btc-updown-5m-<ts>` markets, estimates P(up) via lognormal Φ(d₂) against Coinbase spot + realized vol, records hypothetical trades when edge exceeds threshold, and resolves them by recording actual outcome + P&L. One new thread, single-source price feed, no brain, no ML.
+**Goal:** Ship a paper-only BTC short-horizon up/down worker that scans Polymarket for `btc-updown-<duration>-<ts>` markets (5m and 15m in Phase 1; 1h/4h/1d are supported by the same code if Polymarket lists them), estimates P(up) via lognormal Φ(d₂) against Coinbase spot + realized vol, records hypothetical trades when edge exceeds threshold, and resolves them by recording actual outcome + P&L. One new thread, single-source price feed, no brain, no ML.
+
+The subsystem retains the `btc5m` prefix in code (tables, modules, env vars) as historical shorthand — the 5-minute case was the origin, but the schema stores `window_duration_s` and the scanner regex matches any duration token.
 
 **Architecture:** A single `btc5m_worker` thread registered in `polyagent/main.py` alongside the four existing workers. The worker loop ticks the spot source every 2s, scans Polymarket every 60s, decides and records paper trades every 60s per active market, and resolves markets whose window has ended. Data persists in two new tables (`btc5m_markets`, `btc5m_trades`).
 
@@ -55,21 +57,23 @@ Create `db/migrations/005_btc5m.sql`:
 -- BTC 5-minute paper-trading subsystem: markets and trades.
 
 CREATE TABLE IF NOT EXISTS btc5m_markets (
-    id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    polymarket_id   TEXT UNIQUE NOT NULL,
-    slug            TEXT UNIQUE NOT NULL,
-    token_id_yes    TEXT NOT NULL,
-    token_id_no     TEXT NOT NULL,
-    window_start_ts TIMESTAMPTZ NOT NULL,
-    window_end_ts   TIMESTAMPTZ NOT NULL,
-    start_spot      DECIMAL,
-    end_spot        DECIMAL,
-    outcome         TEXT,
-    discovered_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    resolved_at     TIMESTAMPTZ
+    id                UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    polymarket_id     TEXT UNIQUE NOT NULL,
+    slug              TEXT UNIQUE NOT NULL,
+    token_id_yes      TEXT NOT NULL,
+    token_id_no       TEXT NOT NULL,
+    window_duration_s INTEGER NOT NULL,
+    window_start_ts   TIMESTAMPTZ NOT NULL,
+    window_end_ts     TIMESTAMPTZ NOT NULL,
+    start_spot        DECIMAL,
+    end_spot          DECIMAL,
+    outcome           TEXT,
+    discovered_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    resolved_at       TIMESTAMPTZ
 );
 CREATE INDEX IF NOT EXISTS idx_btc5m_markets_window_end ON btc5m_markets(window_end_ts);
 CREATE INDEX IF NOT EXISTS idx_btc5m_markets_outcome    ON btc5m_markets(outcome);
+CREATE INDEX IF NOT EXISTS idx_btc5m_markets_duration   ON btc5m_markets(window_duration_s);
 
 CREATE TABLE IF NOT EXISTS btc5m_trades (
     id                  UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
@@ -133,26 +137,30 @@ class TestBtc5mMarket:
             slug="btc-updown-5m-1776995400",
             token_id_yes="y",
             token_id_no="n",
+            window_duration_s=300,
             window_start_ts=datetime(2026, 4, 24, 1, 45, tzinfo=timezone.utc),
             window_end_ts=datetime(2026, 4, 24, 1, 50, tzinfo=timezone.utc),
         )
         assert m.outcome is None
         assert m.start_spot is None
         assert m.end_spot is None
+        assert m.window_duration_s == 300
 
-    def test_resolved_market_has_outcome_and_spots(self):
+    def test_resolved_15m_market_has_outcome_and_spots(self):
         m = Btc5mMarket(
             polymarket_id="0xabc",
-            slug="btc-updown-5m-1776995400",
+            slug="btc-updown-15m-1776995400",
             token_id_yes="y",
             token_id_no="n",
-            window_start_ts=datetime(2026, 4, 24, 1, 45, tzinfo=timezone.utc),
+            window_duration_s=900,
+            window_start_ts=datetime(2026, 4, 24, 1, 35, tzinfo=timezone.utc),
             window_end_ts=datetime(2026, 4, 24, 1, 50, tzinfo=timezone.utc),
             start_spot=Decimal("65000"),
             end_spot=Decimal("65100"),
             outcome="YES",
         )
         assert m.outcome == "YES"
+        assert m.window_duration_s == 900
 
 
 class TestBtc5mTrade:
@@ -189,13 +197,18 @@ In `polyagent/models.py`, append after `Position`:
 ```python
 @dataclass
 class Btc5mMarket:
-    """A Polymarket 5-minute BTC up/down market snapshot.
+    """A Polymarket BTC short-horizon up/down market snapshot.
+
+    Covers 5m and 15m today; any ``btc-updown-<duration>-<ts>`` slug
+    with a duration expressible in seconds is supported.
 
     Args:
         polymarket_id: Condition ID on Polymarket.
-        slug: Market slug, always of form ``btc-updown-5m-<unix_ts>``.
+        slug: Market slug, form ``btc-updown-<duration>-<unix_ts>``.
         token_id_yes: CLOB token ID for YES side.
         token_id_no: CLOB token ID for NO side.
+        window_duration_s: Resolution-window length in seconds (300 for 5m,
+                           900 for 15m, 3600 for 1h, etc.).
         window_start_ts: Resolution window open (UTC).
         window_end_ts: Resolution window close (UTC).
         start_spot: Coinbase BTC/USD at window_start_ts; None until resolver runs.
@@ -206,6 +219,7 @@ class Btc5mMarket:
     slug: str
     token_id_yes: str
     token_id_no: str
+    window_duration_s: int
     window_start_ts: datetime
     window_end_ts: datetime
     start_spot: Decimal | None = None
@@ -788,20 +802,45 @@ from polyagent.services.btc5m.scanner import (
 
 
 class TestSlugParser:
-    def test_valid_slug(self):
+    def test_valid_5m_slug(self):
         m = BTC5M_SLUG_RE.match("btc-updown-5m-1776995400")
         assert m is not None
-        assert m.group(1) == "1776995400"
+        assert m.group(1) == "5m"
+        assert m.group(2) == "1776995400"
 
-    def test_parse_returns_window(self):
-        window_start, window_end = parse_btc5m_slug("btc-updown-5m-1776995400")
-        # 1776995400 is window_end (settlement time)
+    def test_valid_15m_slug(self):
+        m = BTC5M_SLUG_RE.match("btc-updown-15m-1776995400")
+        assert m is not None
+        assert m.group(1) == "15m"
+        assert m.group(2) == "1776995400"
+
+    def test_parse_5m_returns_300s_window(self):
+        window_start, window_end, duration = parse_btc5m_slug("btc-updown-5m-1776995400")
         assert window_end == datetime(2026, 4, 24, 1, 50, tzinfo=timezone.utc)
+        assert duration == 300
         assert (window_end - window_start).total_seconds() == 300
+
+    def test_parse_15m_returns_900s_window(self):
+        window_start, window_end, duration = parse_btc5m_slug("btc-updown-15m-1776995400")
+        assert duration == 900
+        assert (window_end - window_start).total_seconds() == 900
+
+    def test_parse_1h_returns_3600s_window(self):
+        # Future-proofing: if Polymarket lists 1h, we catch it.
+        _, _, duration = parse_btc5m_slug("btc-updown-1h-1776995400")
+        assert duration == 3600
+
+    def test_parse_1d_returns_86400s_window(self):
+        _, _, duration = parse_btc5m_slug("btc-updown-1d-1776995400")
+        assert duration == 86400
 
     def test_rejects_wrong_asset(self):
         with pytest.raises(ValueError):
             parse_btc5m_slug("eth-updown-5m-1776995400")
+
+    def test_rejects_malformed_duration(self):
+        with pytest.raises(ValueError):
+            parse_btc5m_slug("btc-updown-fast-1776995400")
 
     def test_rejects_malformed_timestamp(self):
         with pytest.raises(ValueError):
@@ -835,21 +874,28 @@ class TestBtc5mScanner:
         assert m.token_id_yes == "t_yes"
         assert m.token_id_no == "t_no"
 
-    def test_scan_filters_non_btc5m_slugs(self):
+    def test_scan_accepts_5m_and_15m_rejects_other_assets(self):
         http = MagicMock()
         http.get.return_value.status_code = 200
         http.get.return_value.json.return_value = [
             {"conditionId": "0x1", "slug": "btc-updown-5m-1776995400",
              "clobTokenIds": json.dumps(["a","b"]), "endDate": "2026-04-24T01:50:00Z"},
-            {"conditionId": "0x2", "slug": "some-other-market",
+            {"conditionId": "0x2", "slug": "btc-updown-15m-1776995400",
              "clobTokenIds": json.dumps(["c","d"]), "endDate": "2026-04-24T01:50:00Z"},
-            {"conditionId": "0x3", "slug": "eth-updown-5m-1776995400",
+            {"conditionId": "0x3", "slug": "some-other-market",
              "clobTokenIds": json.dumps(["e","f"]), "endDate": "2026-04-24T01:50:00Z"},
+            {"conditionId": "0x4", "slug": "eth-updown-5m-1776995400",
+             "clobTokenIds": json.dumps(["g","h"]), "endDate": "2026-04-24T01:50:00Z"},
         ]
         scanner = Btc5mScanner(http_client=http)
         markets = scanner.scan()
-        assert len(markets) == 1
-        assert markets[0].polymarket_id == "0x1"
+        assert len(markets) == 2
+        ids = {m.polymarket_id for m in markets}
+        assert ids == {"0x1", "0x2"}
+        # Confirm durations parsed into the model
+        by_slug = {m.slug: m for m in markets}
+        assert by_slug["btc-updown-5m-1776995400"].window_duration_s == 300
+        assert by_slug["btc-updown-15m-1776995400"].window_duration_s == 900
 
     def test_scan_empty_on_http_error(self):
         http = MagicMock()
@@ -871,7 +917,12 @@ Expected: ModuleNotFoundError.
 Create `polyagent/services/btc5m/scanner.py`:
 
 ```python
-"""Scans Polymarket Gamma for new BTC 5-minute up/down markets."""
+"""Scans Polymarket Gamma for new BTC short-horizon up/down markets.
+
+Accepts any ``btc-updown-<duration>-<unix_ts>`` slug where ``<duration>``
+is an integer followed by m/h/d (e.g. 5m, 15m, 1h, 4h, 1d). The specific
+duration is preserved on the model as ``window_duration_s``.
+"""
 from __future__ import annotations
 
 import json
@@ -885,26 +936,45 @@ from polyagent.models import Btc5mMarket
 
 logger = logging.getLogger("polyagent.services.btc5m.scanner")
 
-BTC5M_SLUG_RE = re.compile(r"^btc-updown-5m-(\d+)$")
+# Captures (duration_token, unix_ts). duration_token examples: 5m, 15m, 1h, 4h, 1d.
+BTC5M_SLUG_RE = re.compile(r"^btc-updown-(\d+[mhd])-(\d+)$")
 
 _GAMMA_MARKETS_URL = "https://gamma-api.polymarket.com/markets"
 
+_UNIT_TO_SECONDS = {"m": 60, "h": 3600, "d": 86400}
 
-def parse_btc5m_slug(slug: str) -> tuple[datetime, datetime]:
-    """Extract (window_start_ts, window_end_ts) from a BTC 5m slug.
 
-    Raises ValueError for non-BTC-5m slugs or malformed timestamps.
+def _duration_to_seconds(token: str) -> int:
+    """'5m' -> 300, '15m' -> 900, '1h' -> 3600, '1d' -> 86400. Raises on bad input."""
+    if not token or token[-1] not in _UNIT_TO_SECONDS:
+        raise ValueError(f"bad duration token: {token!r}")
+    try:
+        n = int(token[:-1])
+    except ValueError as exc:
+        raise ValueError(f"bad duration number: {token!r}") from exc
+    if n <= 0:
+        raise ValueError(f"non-positive duration: {token!r}")
+    return n * _UNIT_TO_SECONDS[token[-1]]
+
+
+def parse_btc5m_slug(slug: str) -> tuple[datetime, datetime, int]:
+    """Extract (window_start_ts, window_end_ts, window_duration_s) from a slug.
+
+    Raises ValueError for non-BTC slugs, bad duration tokens, or malformed
+    timestamps.
     """
     m = BTC5M_SLUG_RE.match(slug)
     if not m:
-        raise ValueError(f"not a btc-updown-5m slug: {slug!r}")
+        raise ValueError(f"not a btc-updown slug: {slug!r}")
+    duration_token = m.group(1)
     try:
-        end_unix = int(m.group(1))
+        end_unix = int(m.group(2))
     except ValueError as exc:
         raise ValueError(f"malformed timestamp in slug: {slug!r}") from exc
+    duration_s = _duration_to_seconds(duration_token)
     window_end = datetime.fromtimestamp(end_unix, tz=timezone.utc)
-    window_start = window_end - timedelta(seconds=300)
-    return window_start, window_end
+    window_start = window_end - timedelta(seconds=duration_s)
+    return window_start, window_end, duration_s
 
 
 class Btc5mScanner:
@@ -939,7 +1009,7 @@ class Btc5mScanner:
             if not BTC5M_SLUG_RE.match(slug):
                 continue
             try:
-                window_start, window_end = parse_btc5m_slug(slug)
+                window_start, window_end, duration_s = parse_btc5m_slug(slug)
                 token_ids = json.loads(m.get("clobTokenIds") or "[]")
                 if len(token_ids) < 2:
                     continue
@@ -948,6 +1018,7 @@ class Btc5mScanner:
                     slug=slug,
                     token_id_yes=token_ids[0],
                     token_id_no=token_ids[1],
+                    window_duration_s=duration_s,
                     window_start_ts=window_start,
                     window_end_ts=window_end,
                 ))
@@ -1024,6 +1095,7 @@ class TestBtc5mRepository:
             slug="btc-updown-5m-1776995400",
             token_id_yes="y",
             token_id_no="n",
+            window_duration_s=300,
             window_start_ts=datetime(2026, 4, 24, 1, 45, tzinfo=timezone.utc),
             window_end_ts=datetime(2026, 4, 24, 1, 50, tzinfo=timezone.utc),
         )
@@ -1100,10 +1172,10 @@ logger = logging.getLogger("polyagent.repositories.btc5m")
 UPSERT_MARKET = """
     INSERT INTO btc5m_markets (
         polymarket_id, slug, token_id_yes, token_id_no,
-        window_start_ts, window_end_ts
+        window_duration_s, window_start_ts, window_end_ts
     ) VALUES (
         %(polymarket_id)s, %(slug)s, %(token_id_yes)s, %(token_id_no)s,
-        %(window_start_ts)s, %(window_end_ts)s
+        %(window_duration_s)s, %(window_start_ts)s, %(window_end_ts)s
     )
     ON CONFLICT (polymarket_id) DO UPDATE SET
         slug = EXCLUDED.slug
@@ -1124,14 +1196,16 @@ INSERT_TRADE = """
 
 SELECT_UNRESOLVED_PAST_END = """
     SELECT id, polymarket_id, slug, token_id_yes, token_id_no,
-           window_start_ts, window_end_ts, start_spot, end_spot, outcome
+           window_duration_s, window_start_ts, window_end_ts,
+           start_spot, end_spot, outcome
     FROM btc5m_markets
     WHERE outcome IS NULL AND window_end_ts <= %(now)s
 """
 
 SELECT_ACTIVE = """
     SELECT id, polymarket_id, slug, token_id_yes, token_id_no,
-           window_start_ts, window_end_ts, start_spot, end_spot, outcome
+           window_duration_s, window_start_ts, window_end_ts,
+           start_spot, end_spot, outcome
     FROM btc5m_markets
     WHERE outcome IS NULL AND window_end_ts > %(now)s
 """
@@ -1171,6 +1245,7 @@ class Btc5mRepository:
                 "slug": market.slug,
                 "token_id_yes": market.token_id_yes,
                 "token_id_no": market.token_id_no,
+                "window_duration_s": market.window_duration_s,
                 "window_start_ts": market.window_start_ts,
                 "window_end_ts": market.window_end_ts,
             })
@@ -1272,11 +1347,13 @@ def _make_market(now: datetime, ttm_s: int = 120) -> tuple[dict, Btc5mMarket]:
         "polymarket_id": "0x1",
         "slug": "btc-updown-5m-1234567890",
         "token_id_yes": "y", "token_id_no": "n",
+        "window_duration_s": 300,
         "window_start_ts": window_start, "window_end_ts": window_end,
         "start_spot": None, "end_spot": None, "outcome": None,
     }
     model = Btc5mMarket(
         polymarket_id="0x1", slug=row["slug"], token_id_yes="y", token_id_no="n",
+        window_duration_s=300,
         window_start_ts=window_start, window_end_ts=window_end,
     )
     return row, model
@@ -1965,10 +2042,10 @@ def seeded_db(settings: Settings):
         cur.execute(
             """
             INSERT INTO btc5m_markets (id, polymarket_id, slug, token_id_yes, token_id_no,
-                                       window_start_ts, window_end_ts,
+                                       window_duration_s, window_start_ts, window_end_ts,
                                        start_spot, end_spot, outcome, resolved_at)
             VALUES (%s, '0x1', 'btc-updown-5m-1234567890', 'y', 'n',
-                    %s, %s, 65000, 65100, 'YES', NOW())
+                    300, %s, %s, 65000, 65100, 'YES', NOW())
             """, (mid, start, end),
         )
         cur.execute(
@@ -2020,7 +2097,7 @@ from polyagent.infra.config import Settings
 from polyagent.infra.database import Database
 
 
-STATS_QUERY = """
+STATS_QUERY_TOTAL = """
     SELECT
         COUNT(*)                                                   AS trades,
         COUNT(*) FILTER (WHERE pnl > 0)                            AS wins,
@@ -2033,16 +2110,82 @@ STATS_QUERY = """
     WHERE pnl IS NOT NULL
 """
 
+STATS_QUERY_BY_DURATION = """
+    SELECT
+        m.window_duration_s                                        AS window_duration_s,
+        COUNT(*)                                                   AS trades,
+        COUNT(*) FILTER (WHERE t.pnl > 0)                          AS wins,
+        COUNT(*) FILTER (WHERE t.pnl <= 0)                         AS losses,
+        COALESCE(AVG(t.edge_at_decision), 0)                       AS avg_edge,
+        COALESCE(SUM(t.pnl), 0)                                    AS total_pnl,
+        COALESCE(AVG(t.pnl), 0)                                    AS avg_pnl
+    FROM btc5m_trades t
+    JOIN btc5m_markets m ON m.id = t.market_id
+    WHERE t.pnl IS NOT NULL
+    GROUP BY m.window_duration_s
+    ORDER BY m.window_duration_s
+"""
+
+
+def _fmt_duration(seconds: int) -> str:
+    """Render a window duration concisely (300 → '5m', 900 → '15m', 3600 → '1h')."""
+    if seconds % 86400 == 0: return f"{seconds // 86400}d"
+    if seconds % 3600 == 0:  return f"{seconds // 3600}h"
+    if seconds % 60 == 0:    return f"{seconds // 60}m"
+    return f"{seconds}s"
+
 
 @click.command("btc5m-stats")
-def btc5m_stats():
-    """Paper-trading performance of the BTC 5m subsystem."""
+@click.option("--by-duration", is_flag=True,
+              help="Break out performance per window duration (5m vs 15m vs ...).")
+def btc5m_stats(by_duration: bool):
+    """Paper-trading performance of the BTC short-horizon subsystem."""
     console = Console()
     settings = Settings.from_env()
     db = Database(settings)
 
+    if by_duration:
+        with db.cursor() as cur:
+            cur.execute(STATS_QUERY_BY_DURATION)
+            rows = cur.fetchall()
+
+        table = Table(title="BTC Up/Down Performance by Timeframe")
+        table.add_column("Window", style="cyan")
+        table.add_column("Trades", justify="right")
+        table.add_column("W/L", justify="right")
+        table.add_column("Win%", justify="right")
+        table.add_column("Avg Edge", justify="right")
+        table.add_column("Avg P&L", justify="right")
+        table.add_column("Total P&L", justify="right")
+
+        if not rows:
+            table.add_row("(none)", "0", "-", "-", "-", "-", "$0.00")
+        else:
+            for r in rows:
+                trades = int(r["trades"])
+                wins = int(r["wins"])
+                losses = int(r["losses"])
+                win_pct = (wins / trades * 100) if trades else 0.0
+                total_pnl = float(r["total_pnl"])
+                avg_pnl = float(r["avg_pnl"])
+                avg_edge = float(r["avg_edge"])
+                pnl_style = "green" if total_pnl >= 0 else "red"
+                table.add_row(
+                    _fmt_duration(int(r["window_duration_s"])),
+                    str(trades),
+                    f"{wins}/{losses}",
+                    f"{win_pct:.1f}%",
+                    f"{avg_edge:+.3f}",
+                    f"${avg_pnl:+,.2f}",
+                    f"[{pnl_style}]${total_pnl:+,.2f}[/{pnl_style}]",
+                )
+
+        console.print(table)
+        db.close()
+        return
+
     with db.cursor() as cur:
-        cur.execute(STATS_QUERY)
+        cur.execute(STATS_QUERY_TOTAL)
         row = cur.fetchone()
 
     trades = int(row["trades"] or 0)
@@ -2053,7 +2196,7 @@ def btc5m_stats():
     avg_pnl = float(row["avg_pnl"] or 0)
     avg_vol = float(row["avg_vol"] or 0)
 
-    table = Table(title="BTC 5m Paper-Trading Performance")
+    table = Table(title="BTC Up/Down Paper-Trading Performance")
     table.add_column("Metric", style="cyan")
     table.add_column("Value", justify="right")
 

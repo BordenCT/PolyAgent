@@ -1,19 +1,29 @@
-# BTC 5-Minute Markets Subsystem
+# BTC Short-Horizon Up/Down Subsystem (name: `btc5m`)
 
 ## Motivation
 
-Polymarket runs a continuous stream of 5-minute up/down binary markets on
-BTC (one new market per 5-minute window, ~24h trading window before each
-market's resolution clock starts). Sample market: "Bitcoin Up or Down -
-April 23, 9:50PM-9:55PM ET" with $8.7k liquidity, 1¢ spread, $64k 24h
-volume. These are the "faster markets" the main bot can't exploit with its
-4-hour scan cadence and LLM brain.
+Polymarket runs continuous streams of short-horizon up/down binary markets
+on BTC at multiple timeframes — confirmed **5-minute and 15-minute**
+windows, with a slug convention (`btc-updown-Xm|Xh|Xd-<unix_ts>`) that is
+ready to absorb hourly or daily expansions without code changes. Sample
+market: "Bitcoin Up or Down - April 23, 9:50PM-9:55PM ET" with $8.7k
+liquidity, 1¢ spread, $64k 24h volume.
+
+These are the "faster markets" the main bot can't exploit with its 4-hour
+scan cadence and LLM brain.
 
 The existing PolyAgent pipeline (scan → brain → consensus → execute) is
-designed for slow, qualitative markets where an LLM adds value. For 5m BTC
-binaries the right decision is a lognormal calculation against a live spot
-price, not LLM reasoning. We add a parallel subsystem that bypasses the
-brain entirely and runs on a cadence appropriate for its instrument.
+designed for slow, qualitative markets where an LLM adds value. For BTC
+up/down binaries the right decision is a lognormal calculation against a
+live spot price, not LLM reasoning. We add a parallel subsystem that
+bypasses the brain entirely and runs on a cadence appropriate for its
+instrument.
+
+**Naming note:** the subsystem retains the `btc5m` prefix in code
+(tables, modules, env vars) as historical shorthand — it was designed for
+5-minute markets first. Functionally it handles any `btc-updown-<duration>-<ts>`
+slug; the `window_duration_s` column on each row distinguishes 5m from 15m
+and from future timeframes. Renaming the code is deferred YAGNI.
 
 This spec covers **Phase 1 (MVP, paper-only)** which delivers:
 - Instrumentation to observe whether a math estimator has edge over the
@@ -79,7 +89,9 @@ Consequences:
 ## Non-goals (explicit)
 
 - Not covering ETH, SOL, XRP, DOGE. BTC only. Expansion happens across
-  **timeframes** (1h, 1d) if Phase 1 succeeds.
+  **timeframes** — 5m and 15m are in scope for Phase 1; 1h / 4h / 1d come
+  for free with the same code the moment Polymarket lists them (the
+  scanner regex and the estimator's TTM parameter already handle them).
 - No live trading in Phase 1. Paper only.
 - No LLM brain integration. Math estimator only.
 - No orderbook microstructure modeling (imbalance, hidden liquidity).
@@ -128,9 +140,10 @@ Key design properties:
 - **Spot polling at 2s.** Gives ~150 ticks per 5m window — enough for a
   meaningful realized-vol estimate. Can move to WebSocket in Phase 2 if
   evidence shows latency matters.
-- **Market scanning at 60s.** New 5m markets spawn every 5 min; a 60s
-  poll catches them within 1 minute of creation. Plenty of headroom
-  because the trading window is ~24h before the 5-min resolution window.
+- **Market scanning at 60s.** New 5m markets spawn every 5 min, new 15m
+  markets every 15 min; a 60s poll catches them within 1 minute of
+  creation. Plenty of headroom because the trading window is ~24h before
+  the resolution window.
 - **Per-market decision at 60s.** Each active market is evaluated once a
   minute against the current estimator output. If the absolute edge
   exceeds threshold, record a paper trade.
@@ -196,21 +209,24 @@ def estimate_up_probability(
   by known amount).
 - Pure function, so no mocking overhead in tests.
 
-### 3. `btc5m/scanner.py` — 5m market discovery
+### 3. `btc5m/scanner.py` — market discovery (any BTC up/down timeframe)
 
 Polls Polymarket Gamma every 60s for markets whose slug matches
-`btc-updown-5m-<unix_ts>`. For each:
-- Parse `unix_ts` from slug → that's the resolution time (window end).
-- Resolution window is always 5 minutes → window start = `unix_ts - 300`.
-- Upsert into `btc5m_markets` table keyed by polymarket_id.
+`btc-updown-<duration>-<unix_ts>` where `<duration>` is any
+`\d+[mhd]` token (e.g. `5m`, `15m`, `1h`, `4h`, `1d`). For each:
+- Parse `unix_ts` from slug → resolution time (window end).
+- Parse `<duration>` → convert to seconds (`5m` → 300, `15m` → 900, `1h`
+  → 3600, etc.). That becomes `window_duration_s`.
+- `window_start_ts = window_end_ts - window_duration_s`.
+- Upsert into `btc5m_markets` table keyed by polymarket_id, storing
+  `window_duration_s` as a column.
 - Skip markets we've already seen (idempotent).
 
 ```python
 def scan(self, poll_interval_s: int = 60) -> list[Btc5mMarket]: ...
 ```
 
-Returns the freshly-discovered markets (both newly-created and
-newly-resolved) so the worker loop can react.
+Returns the freshly-discovered markets so the worker loop can react.
 
 ### 4. `btc5m/book.py` — CLOB orderbook fetcher
 
@@ -296,8 +312,8 @@ Key columns:
 - `Realized Vol`: average realized vol at decision time (sanity check on
   the input).
 
-Slicing options via flags: `--by-day`, `--by-ttm-bucket` (TTM at decision),
-`--by-edge-bucket`, `--last N`.
+Slicing options via flags: `--by-day`, `--by-duration` (5m vs 15m vs future),
+`--by-ttm-bucket` (TTM at decision), `--by-edge-bucket`, `--last N`.
 
 ## Data Model
 
@@ -305,21 +321,23 @@ Slicing options via flags: `--by-day`, `--by-ttm-bucket` (TTM at decision),
 
 ```sql
 CREATE TABLE btc5m_markets (
-    id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    polymarket_id   TEXT UNIQUE NOT NULL,
-    slug            TEXT UNIQUE NOT NULL,
-    token_id_yes    TEXT NOT NULL,
-    token_id_no     TEXT NOT NULL,
-    window_start_ts TIMESTAMPTZ NOT NULL,    -- derived from slug
-    window_end_ts   TIMESTAMPTZ NOT NULL,    -- derived from slug
-    start_spot      DECIMAL,                 -- Coinbase spot at window_start_ts, set on resolve
-    end_spot        DECIMAL,                 -- Coinbase spot at window_end_ts, set on resolve
-    outcome         TEXT,                    -- 'YES'|'NO', set on resolve
-    discovered_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    resolved_at     TIMESTAMPTZ
+    id               UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    polymarket_id    TEXT UNIQUE NOT NULL,
+    slug             TEXT UNIQUE NOT NULL,
+    token_id_yes     TEXT NOT NULL,
+    token_id_no      TEXT NOT NULL,
+    window_duration_s INTEGER NOT NULL,       -- 300 for 5m, 900 for 15m, 3600 for 1h, etc.
+    window_start_ts  TIMESTAMPTZ NOT NULL,    -- derived from slug
+    window_end_ts    TIMESTAMPTZ NOT NULL,    -- derived from slug
+    start_spot       DECIMAL,                 -- Coinbase spot at window_start_ts, set on resolve
+    end_spot         DECIMAL,                 -- Coinbase spot at window_end_ts, set on resolve
+    outcome          TEXT,                    -- 'YES'|'NO', set on resolve
+    discovered_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    resolved_at      TIMESTAMPTZ
 );
 CREATE INDEX idx_btc5m_markets_window_end ON btc5m_markets(window_end_ts);
 CREATE INDEX idx_btc5m_markets_outcome    ON btc5m_markets(outcome);
+CREATE INDEX idx_btc5m_markets_duration   ON btc5m_markets(window_duration_s);
 
 CREATE TABLE btc5m_trades (
     id                  UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
@@ -439,8 +457,9 @@ better price source.
   Kelly sizing option.
 - **Chainlink Data Streams migration.** When credentials arrive, swap
   `BtcSpotSource` for `ChainlinkSpotSource` via config; no other change.
-- **Timeframe expansion.** Add 1h and 1d BTC markets by parameterizing
-  the scanner's slug matcher and the estimator's TTM input.
+- **Timeframe expansion beyond 5m/15m.** The scanner regex and estimator
+  TTM input already accept any duration; when Polymarket lists 1h/4h/1d
+  BTC up/down binaries, they are picked up for free.
 - **WebSocket spot feed.** Only if latency ends up mattering.
 - **Kelly sizing.** Only after we have realized-edge data to fit Kelly's
   underlying parameters.
