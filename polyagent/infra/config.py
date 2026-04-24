@@ -72,6 +72,15 @@ class Settings:
     ollama_model: str
     ollama_enabled: bool
 
+    # BTC 5-minute subsystem
+    btc5m_enabled: bool
+    btc5m_spot_poll_s: float
+    btc5m_market_poll_s: int
+    btc5m_vol_window_s: int
+    btc5m_edge_threshold: float
+    btc5m_position_size_usd: float
+    btc5m_fees_bps: float
+
     # Live order placement — belt-and-suspenders safety gate on top of paper_trade
     polymarket_live_enabled: bool
 
@@ -126,5 +135,12 @@ class Settings:
             ollama_url=_env_str("OLLAMA_URL", "http://192.168.1.56:11434"),
             ollama_model=_env_str("OLLAMA_MODEL", "phi4:14b"),
             ollama_enabled=_env_bool("OLLAMA_ENABLED", True),
+            btc5m_enabled=_env_bool("BTC5M_ENABLED", False),
+            btc5m_spot_poll_s=_env_float("BTC5M_SPOT_POLL_S", 2.0),
+            btc5m_market_poll_s=_env_int("BTC5M_MARKET_POLL_S", 60),
+            btc5m_vol_window_s=_env_int("BTC5M_VOL_WINDOW_S", 300),
+            btc5m_edge_threshold=_env_float("BTC5M_EDGE_THRESHOLD", 0.05),
+            btc5m_position_size_usd=_env_float("BTC5M_POSITION_SIZE_USD", 5.0),
+            btc5m_fees_bps=_env_float("BTC5M_FEES_BPS", 0.0),
             polymarket_live_enabled=_env_bool("POLYMARKET_LIVE_ENABLED", False),
         )

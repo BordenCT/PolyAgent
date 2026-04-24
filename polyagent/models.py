@@ -319,3 +319,61 @@ class Position:
             closed_at=None,
             volume_at_entry=volume_at_entry,
         )
+
+
+@dataclass
+class Btc5mMarket:
+    """A Polymarket BTC short-horizon up/down market snapshot.
+
+    Covers 5m and 15m today; any ``btc-updown-<duration>-<ts>`` slug
+    with a duration expressible in seconds is supported.
+
+    Args:
+        polymarket_id: Condition ID on Polymarket.
+        slug: Market slug, form ``btc-updown-<duration>-<unix_ts>``.
+        token_id_yes: CLOB token ID for YES side.
+        token_id_no: CLOB token ID for NO side.
+        window_duration_s: Resolution-window length in seconds (300 for 5m,
+                           900 for 15m, 3600 for 1h, etc.).
+        window_start_ts: Resolution window open (UTC).
+        window_end_ts: Resolution window close (UTC).
+        start_spot: Coinbase BTC/USD at window_start_ts; None until resolver runs.
+        end_spot: Coinbase BTC/USD at window_end_ts; None until resolver runs.
+        outcome: 'YES' if end_spot >= start_spot, else 'NO'; None until resolver runs.
+    """
+    polymarket_id: str
+    slug: str
+    token_id_yes: str
+    token_id_no: str
+    window_duration_s: int
+    window_start_ts: datetime
+    window_end_ts: datetime
+    start_spot: Decimal | None = None
+    end_spot: Decimal | None = None
+    outcome: str | None = None
+
+
+@dataclass
+class Btc5mTrade:
+    """A simulated paper trade on a Btc5mMarket.
+
+    Args:
+        market_id: Foreign key to ``btc5m_markets.id``.
+        side: 'YES' or 'NO'.
+        fill_price_assumed: Worst-case fill (best_ask for YES, best_bid for NO).
+        size: Notional USD of the trade.
+        estimator_p_up: Estimator's P(up) at decision time.
+        spot_at_decision: Coinbase spot at decision time.
+        vol_at_decision: Rolling realized vol used for the estimator.
+        edge_at_decision: estimator_p_up - market_mid at decision time.
+        pnl: Realized P&L set by resolver; None while market is open.
+    """
+    market_id: UUID
+    side: str
+    fill_price_assumed: Decimal
+    size: Decimal
+    estimator_p_up: float
+    spot_at_decision: Decimal
+    vol_at_decision: float
+    edge_at_decision: float
+    pnl: Decimal | None = None

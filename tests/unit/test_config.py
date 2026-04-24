@@ -46,3 +46,24 @@ class TestSettings:
             s = Settings.from_env()
             assert s.anthropic_api_key == ""
             assert s.llm_provider == "ollama"
+
+
+def test_btc5m_defaults():
+    with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "sk-test"}, clear=False):
+        s = Settings.from_env()
+        assert s.btc5m_enabled is False
+        assert s.btc5m_spot_poll_s == 2.0
+        assert s.btc5m_market_poll_s == 60
+        assert s.btc5m_vol_window_s == 300
+        assert s.btc5m_edge_threshold == 0.05
+        assert s.btc5m_position_size_usd == 5.0
+        assert s.btc5m_fees_bps == 0.0
+
+
+def test_btc5m_from_env(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    monkeypatch.setenv("BTC5M_ENABLED", "true")
+    monkeypatch.setenv("BTC5M_EDGE_THRESHOLD", "0.08")
+    s = Settings.from_env()
+    assert s.btc5m_enabled is True
+    assert s.btc5m_edge_threshold == 0.08

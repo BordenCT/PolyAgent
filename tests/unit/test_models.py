@@ -1,5 +1,7 @@
 """Tests for domain models."""
 from decimal import Decimal
+from datetime import datetime, timezone
+from uuid import uuid4
 
 from polyagent.models import (
     ExitReason, MarketClass, MarketData, MarketStatus, PositionSide, PositionStatus,
@@ -93,3 +95,54 @@ class TestMarketClass:
             market_class=MarketClass.CRYPTO,
         )
         assert m.market_class == MarketClass.CRYPTO
+
+
+from polyagent.models import Btc5mMarket, Btc5mTrade
+
+
+class TestBtc5mMarket:
+    def test_open_market_has_no_outcome(self):
+        m = Btc5mMarket(
+            polymarket_id="0xabc",
+            slug="btc-updown-5m-1776995400",
+            token_id_yes="y",
+            token_id_no="n",
+            window_duration_s=300,
+            window_start_ts=datetime(2026, 4, 24, 1, 45, tzinfo=timezone.utc),
+            window_end_ts=datetime(2026, 4, 24, 1, 50, tzinfo=timezone.utc),
+        )
+        assert m.outcome is None
+        assert m.start_spot is None
+        assert m.end_spot is None
+        assert m.window_duration_s == 300
+
+    def test_resolved_15m_market_has_outcome_and_spots(self):
+        m = Btc5mMarket(
+            polymarket_id="0xabc",
+            slug="btc-updown-15m-1776995400",
+            token_id_yes="y",
+            token_id_no="n",
+            window_duration_s=900,
+            window_start_ts=datetime(2026, 4, 24, 1, 35, tzinfo=timezone.utc),
+            window_end_ts=datetime(2026, 4, 24, 1, 50, tzinfo=timezone.utc),
+            start_spot=Decimal("65000"),
+            end_spot=Decimal("65100"),
+            outcome="YES",
+        )
+        assert m.outcome == "YES"
+        assert m.window_duration_s == 900
+
+
+class TestBtc5mTrade:
+    def test_create_unresolved_trade(self):
+        t = Btc5mTrade(
+            market_id=uuid4(),
+            side="YES",
+            fill_price_assumed=Decimal("0.52"),
+            size=Decimal("5.00"),
+            estimator_p_up=0.58,
+            spot_at_decision=Decimal("65000"),
+            vol_at_decision=0.45,
+            edge_at_decision=0.06,
+        )
+        assert t.pnl is None
