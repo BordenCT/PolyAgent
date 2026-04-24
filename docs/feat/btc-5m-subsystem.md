@@ -452,6 +452,13 @@ better price source.
 
 ## Future work (out of scope for this spec)
 
+Sequenced, gated phases are tracked in
+[`btc-5m-roadmap.md`](btc-5m-roadmap.md) — Phase 2 (live trading),
+Phase 3 (Chainlink swap), Phase 4 (latency upgrades), Phase 5 (cross-
+tenor arbitrage), and the explicit non-goals (no asset expansion, no
+ML, no LLM). Summary highlights:
+
+
 - **Phase 2: live trading.** Flip paper → live behind the new env var.
   Per-trade log already exists. Needs bankroll cap, per-day loss cap,
   Kelly sizing option.
