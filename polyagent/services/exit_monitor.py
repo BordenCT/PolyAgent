@@ -71,15 +71,18 @@ class ExitMonitorService:
         high_cutoff = 1.0 - self._resolved_no_threshold
 
         if is_resolved:
+            # Resolution outcome wins regardless of entry — a near-boundary
+            # entry (e.g., 0.997) on a YES-won market must still classify as
+            # RESOLVED_YES so P&L and the exit label reflect reality.
             # 0a. YES resolved — price pinned near 1.0
-            if current >= high_cutoff and entry < high_cutoff:
+            if current >= high_cutoff:
                 logger.info(
                     "RESOLVED_YES: current=%.4f >= %.4f threshold",
                     current, high_cutoff,
                 )
                 return ExitReason.RESOLVED_YES
             # 0b. NO resolved — price pinned near 0.0
-            if current <= self._resolved_no_threshold and entry > self._resolved_no_threshold:
+            if current <= self._resolved_no_threshold:
                 logger.info(
                     "RESOLVED_NO: current=%.4f <= %.4f threshold",
                     current, self._resolved_no_threshold,

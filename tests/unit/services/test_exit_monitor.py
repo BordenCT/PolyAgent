@@ -197,3 +197,31 @@ class TestExitMonitor:
             is_resolved=True,
         )
         assert result == ExitReason.RESOLVED_NO
+
+    def test_resolved_yes_fires_even_for_near_boundary_entry(self):
+        """A BUY entered at 0.997 on a YES-won market must still classify as
+        RESOLVED_YES. Entry-price gating previously suppressed this."""
+        result = self.monitor.check_exit(
+            entry_price=Decimal("0.997"),
+            target_price=Decimal("0.999"),
+            current_price=Decimal("1.00"),
+            volume_10min=100.0,
+            avg_volume_10min=100.0,
+            hours_since_entry=4.0,
+            is_resolved=True,
+        )
+        assert result == ExitReason.RESOLVED_YES
+
+    def test_resolved_no_fires_even_for_near_boundary_entry(self):
+        """A BUY entered at 0.003 on a NO-won market must still classify as
+        RESOLVED_NO. Entry-price gating previously suppressed this."""
+        result = self.monitor.check_exit(
+            entry_price=Decimal("0.003"),
+            target_price=Decimal("0.001"),
+            current_price=Decimal("0.00"),
+            volume_10min=100.0,
+            avg_volume_10min=100.0,
+            hours_since_entry=4.0,
+            is_resolved=True,
+        )
+        assert result == ExitReason.RESOLVED_NO
