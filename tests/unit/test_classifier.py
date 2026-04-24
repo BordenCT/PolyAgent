@@ -103,8 +103,9 @@ def test_priority_crypto_beats_sports_keyword():
 
 
 def test_priority_sports_beats_politics_keyword():
-    # A politician at a game -> sports (the event is what we'd be trading).
-    q = "Will Biden attend the Super Bowl?"
+    # A market with both a politician name and a clear sports keyword (vs.)
+    # — sports is checked before politics in the cascade, so it wins.
+    q = "Will Trump attend Lakers vs. Celtics?"
     assert classify(q, "unknown") == MarketClass.SPORTS
 
 
