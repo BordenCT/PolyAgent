@@ -2,7 +2,7 @@
 from decimal import Decimal
 
 from polyagent.models import (
-    ExitReason, MarketData, MarketStatus, PositionSide, PositionStatus,
+    ExitReason, MarketClass, MarketData, MarketStatus, PositionSide, PositionStatus,
     Score, ThesisChecks, Vote, VoteAction,
 )
 
@@ -62,3 +62,34 @@ class TestThesisChecks:
     def test_all_failed(self):
         checks = ThesisChecks(base_rate=False, news=False, whale=False, disposition=False)
         assert checks.passed_count == 0
+
+
+class TestMarketClass:
+    def test_values(self):
+        assert MarketClass.SPORTS.value == "sports"
+        assert MarketClass.CRYPTO.value == "crypto"
+        assert MarketClass.POLITICS.value == "politics"
+        assert MarketClass.MACRO.value == "macro"
+        assert MarketClass.OTHER.value == "other"
+
+    def test_str_enum_behavior(self):
+        assert MarketClass.SPORTS == "sports"
+
+    def test_market_data_default_class_is_none(self):
+        m = MarketData(
+            polymarket_id="0x1", question="q", category="c",
+            token_id="t", midpoint_price=Decimal("0.5"),
+            bids_depth=Decimal("1"), asks_depth=Decimal("1"),
+            hours_to_resolution=1.0, volume_24h=Decimal("1"),
+        )
+        assert m.market_class is None
+
+    def test_market_data_accepts_class(self):
+        m = MarketData(
+            polymarket_id="0x1", question="q", category="c",
+            token_id="t", midpoint_price=Decimal("0.5"),
+            bids_depth=Decimal("1"), asks_depth=Decimal("1"),
+            hours_to_resolution=1.0, volume_24h=Decimal("1"),
+            market_class=MarketClass.CRYPTO,
+        )
+        assert m.market_class == MarketClass.CRYPTO

@@ -38,6 +38,13 @@ class Consensus(StrEnum):
     HALF = "half"
     NONE = "none"
 
+class MarketClass(StrEnum):
+    SPORTS = "sports"
+    CRYPTO = "crypto"
+    POLITICS = "politics"
+    MACRO = "macro"
+    OTHER = "other"
+
 
 @dataclass(frozen=True)
 class Score:
@@ -69,6 +76,7 @@ class MarketData:
         asks_depth: Total USD available on the ask side.
         hours_to_resolution: Hours until the market resolves.
         volume_24h: 24-hour trading volume in USD.
+        market_class: Coarse classification set by the scanner before upsert.
     """
     polymarket_id: str
     question: str
@@ -79,6 +87,7 @@ class MarketData:
     asks_depth: Decimal
     hours_to_resolution: float
     volume_24h: Decimal
+    market_class: MarketClass | None = None
 
     @property
     def min_depth(self) -> Decimal:
