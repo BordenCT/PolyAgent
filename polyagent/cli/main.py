@@ -4,6 +4,7 @@ from __future__ import annotations
 import click
 
 from polyagent.cli.backtest_cmd import backtest
+from polyagent.cli.class_stats import class_stats
 from polyagent.cli.ingest_cmd import ingest
 from polyagent.cli.markets import markets, thesis
 from polyagent.cli.performance import perf
@@ -37,3 +38,4 @@ cli.add_command(thesis)
 cli.add_command(backtest)
 cli.add_command(ingest)
 cli.add_command(reset)
+cli.add_command(class_stats)

@@ -24,6 +24,7 @@ from polyagent.infra.pool import WorkerPool
 from polyagent.infra.queues import Queues, ScanResult, ThesisResult
 from polyagent.models import MarketStatus
 from polyagent.services.brain import BrainService
+from polyagent.services.classifier import classify
 from polyagent.services.embeddings import EmbeddingsService
 from polyagent.services.executor import ExecutorService
 from polyagent.services.exit_monitor import ExitMonitorService
@@ -142,6 +143,7 @@ def run() -> None:
                 skipped_open = 0
                 skipped_cooldown = 0
                 for market, score in survivors:
+                    market.market_class = classify(market.question, market.category)
                     db_id = market_repo.upsert(market, MarketStatus.QUEUED)
                     if db_id in open_market_ids:
                         skipped_open += 1
