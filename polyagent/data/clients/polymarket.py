@@ -140,6 +140,13 @@ class PolymarketClient:
         zero price means "market resolved NO" vs "book is temporarily empty".
         Retries once after a back-off on 429 (rate limit).
 
+        Resolution is detected via ``tokens[i].winner``. The CLOB sets this
+        only on final resolution, which avoids treating paused or delisted
+        markets (``closed=true`` without a winner) as resolved. For resolved
+        markets ``midpoint_price`` is pinned to 1.0 or 0.0 in YES coordinates
+        based on which token won — not derived from the (empty) order book —
+        so downstream P&L sees the real payoff.
+
         Args:
             condition_id: Polymarket market condition id.
 
@@ -152,19 +159,46 @@ class PolymarketClient:
                 resp = self._http.get(f"/markets/{condition_id}")
                 resp.raise_for_status()
                 raw = resp.json()
-                best_bid = float(raw.get("best_bid", 0) or 0)
-                best_ask = float(raw.get("best_ask", 0) or 0)
-                midpoint = (best_bid + best_ask) / 2 if best_bid and best_ask else best_bid or best_ask
 
-                # Multiple signals can indicate resolution; require at least one
-                # explicit flag from the CLOB to avoid treating thin books as
-                # resolved markets. `closed` and `archived` are authoritative;
-                # `accepting_orders=false` alone is not (pre-open markets show
-                # this too).
-                is_resolved = bool(raw.get("closed")) or bool(raw.get("archived"))
+                tokens = raw.get("tokens") or []
+                yes_token = next(
+                    (t for t in tokens if str(t.get("outcome", "")).strip().lower() == "yes"),
+                    None,
+                )
+                winner_token = next(
+                    (t for t in tokens if t.get("winner") is True),
+                    None,
+                )
+                is_resolved = winner_token is not None
+
+                if is_resolved:
+                    winner_id = winner_token.get("token_id")
+                    yes_id = yes_token.get("token_id") if yes_token else None
+                    if yes_token is None:
+                        # Categorical / non-binary market — PolyAgent's scanner
+                        # should not enter these, but fail loud if one slips in.
+                        logger.warning(
+                            "Resolved market %s has no 'Yes' token; tokens=%s",
+                            condition_id,
+                            [t.get("outcome") for t in tokens],
+                        )
+                        current_price = Decimal("0")
+                    elif winner_id and yes_id and winner_id == yes_id:
+                        current_price = Decimal("1")
+                    else:
+                        current_price = Decimal("0")
+                else:
+                    best_bid = float(raw.get("best_bid", 0) or 0)
+                    best_ask = float(raw.get("best_ask", 0) or 0)
+                    midpoint = (
+                        (best_bid + best_ask) / 2
+                        if best_bid and best_ask
+                        else best_bid or best_ask
+                    )
+                    current_price = Decimal(str(round(midpoint, 4)))
 
                 return {
-                    "midpoint_price": Decimal(str(round(midpoint, 4))),
+                    "midpoint_price": current_price,
                     "volume_24h": Decimal(str(raw.get("volume", 0) or 0)),
                     "is_resolved": is_resolved,
                 }
