@@ -1,0 +1,167 @@
+{
+  "nodes": [
+    {
+      "id": "title",
+      "type": "text",
+      "text": "# BTC 5-Minute Markets Subsystem\n\nForward-running paper trader for Polymarket's 5m BTC up/down binaries. Pure math, no brain, no ML.",
+      "x": -640,
+      "y": -600,
+      "width": 700,
+      "height": 130,
+      "color": "4"
+    },
+    {
+      "id": "prob",
+      "type": "text",
+      "text": "## Problem\n\n- Polymarket has 5m BTC up/down binaries.\n- Main bot's brain + 4h cadence can't touch them.\n- OddArb built similar, sat in paper 12 months without going live.\n- Chainlink Data Streams is the settlement source — gated, no history.",
+      "x": -640,
+      "y": -440,
+      "width": 340,
+      "height": 230,
+      "color": "1"
+    },
+    {
+      "id": "goal",
+      "type": "text",
+      "text": "## Goal (Phase 1)\n\nParallel worker thread that:\n1. Scans Polymarket for new 5m BTC markets\n2. Estimates P(up) via lognormal Φ(d₂)\n3. Records paper trades when edge > threshold\n4. Resolves and computes realized P&L\n\nNo live trading. No ML. No LLM.",
+      "x": -270,
+      "y": -440,
+      "width": 340,
+      "height": 230,
+      "color": "5"
+    },
+    {
+      "id": "worker",
+      "type": "text",
+      "text": "**btc5m_worker**\nNew thread in main.py alongside existing 4 workers. Single loop handling everything.",
+      "x": -640,
+      "y": -170,
+      "width": 280,
+      "height": 100,
+      "color": "3"
+    },
+    {
+      "id": "spot",
+      "type": "text",
+      "text": "**BtcSpotSource**\nPolls Coinbase REST every 2s. Ring buffer ≤ 1h. Exposes:\n- current()\n- realized_vol(window_s)\n\nInterface-shaped for later Chainlink swap.",
+      "x": -340,
+      "y": -170,
+      "width": 280,
+      "height": 160,
+      "color": "6"
+    },
+    {
+      "id": "scanner",
+      "type": "text",
+      "text": "**Scanner**\nPolls Polymarket Gamma every 60s for `btc-updown-5m-<ts>` slugs. Derives window from the slug timestamp. Upserts to btc5m_markets.",
+      "x": -40,
+      "y": -170,
+      "width": 280,
+      "height": 160,
+      "color": "6"
+    },
+    {
+      "id": "estimator",
+      "type": "text",
+      "text": "**Estimator (pure)**\n`estimate_up_probability(start_price, current_spot, ttm_seconds, vol) → float`\n\nBlack-Scholes Φ(d₂). Parameterized on TTM so 1h/1d markets reuse the same code.",
+      "x": -640,
+      "y": 40,
+      "width": 320,
+      "height": 180,
+      "color": "6"
+    },
+    {
+      "id": "decider",
+      "type": "text",
+      "text": "**Decider**\nEvery 60s, for each active market:\n- compute estimator p_up\n- fetch CLOB book mid\n- if |edge| > THRESHOLD and edge × size > fees+spread → trigger paper trade",
+      "x": -300,
+      "y": 40,
+      "width": 300,
+      "height": 180,
+      "color": "6"
+    },
+    {
+      "id": "executor",
+      "type": "text",
+      "text": "**Paper Executor**\nWrites btc5m_trades rows with decision snapshot (estimator, spot, vol, edge, side, assumed fill). Worst-case spread assumed — no favourable fills modeled.",
+      "x": 20,
+      "y": 40,
+      "width": 300,
+      "height": 180,
+      "color": "6"
+    },
+    {
+      "id": "resolver",
+      "type": "text",
+      "text": "**Resolver**\nWhen window_end_ts passes:\n- fetch Coinbase spot at start/end\n- determine outcome (end ≥ start?)\n- compute realized P&L per paper trade\n- update btc5m_trades",
+      "x": -460,
+      "y": 260,
+      "width": 320,
+      "height": 180,
+      "color": "6"
+    },
+    {
+      "id": "cli",
+      "type": "text",
+      "text": "**polyagent btc5m-stats**\nRich table: trades, wins, losses, win%, avg edge, avg P&L, total P&L, realized vol.\n\nFlags: --by-day, --by-ttm-bucket, --by-edge-bucket",
+      "x": -120,
+      "y": 260,
+      "width": 320,
+      "height": 180,
+      "color": "3"
+    },
+    {
+      "id": "gates",
+      "type": "text",
+      "text": "## Decision Gate to Phase 2 (live)\n\nAuthorized only if at 2–4 week mark:\n1. Total P&L ≥ $5 (not just 'positive')\n2. Win rate ≥ 52% (breakeven ≈ 50.5% on 1¢ spread)\n3. No systematic Coinbase→Chainlink basis drift\n\nFail any → stop, keep infra running, revisit when Chainlink credentials arrive.",
+      "x": 280,
+      "y": 260,
+      "width": 360,
+      "height": 220,
+      "color": "4"
+    },
+    {
+      "id": "oddarb",
+      "type": "text",
+      "text": "## OddArb Lessons Applied\n\n**Port:** Φ(d₂) math, price-feed pattern, paper-trade schema.\n\n**Avoid:** LLM detours, ML trend models, monitoring for stubbed features, mixed async/sync DB, pivoting mid-project.",
+      "x": 80,
+      "y": -440,
+      "width": 340,
+      "height": 230,
+      "color": "3"
+    },
+    {
+      "id": "chainlink",
+      "type": "text",
+      "text": "## Chainlink Plan\n\n- **Now**: Apply for Polymarket's sponsored key via Typeform (parallel track).\n- **Until approved**: Coinbase REST, accept ~bps basis.\n- **When approved**: Swap BtcSpotSource → ChainlinkSpotSource. Zero other changes.",
+      "x": 440,
+      "y": -440,
+      "width": 320,
+      "height": 230,
+      "color": "2"
+    },
+    {
+      "id": "future",
+      "type": "text",
+      "text": "## Future (not in Phase 1)\n\n- Phase 2: live trading + bankroll cap\n- Chainlink swap post-approval\n- Timeframe expansion (1h, 1d BTC)\n- WebSocket spot (if latency matters)\n- Kelly sizing (once edge data exists)\n- Cross-tenor arb (5m vs 1h)",
+      "x": 440,
+      "y": -170,
+      "width": 320,
+      "height": 240,
+      "color": "2"
+    }
+  ],
+  "edges": [
+    {"id": "e1", "fromNode": "prob", "fromSide": "right", "toNode": "goal", "toSide": "left"},
+    {"id": "e2", "fromNode": "worker", "fromSide": "right", "toNode": "spot", "toSide": "left"},
+    {"id": "e3", "fromNode": "worker", "fromSide": "bottom", "toNode": "estimator", "toSide": "top"},
+    {"id": "e4", "fromNode": "worker", "fromSide": "right", "toNode": "scanner", "toSide": "left"},
+    {"id": "e5", "fromNode": "spot", "fromSide": "bottom", "toNode": "estimator", "toSide": "top", "label": "spot + vol"},
+    {"id": "e6", "fromNode": "scanner", "fromSide": "bottom", "toNode": "decider", "toSide": "top", "label": "active markets"},
+    {"id": "e7", "fromNode": "estimator", "fromSide": "right", "toNode": "decider", "toSide": "left", "label": "p_up"},
+    {"id": "e8", "fromNode": "decider", "fromSide": "right", "toNode": "executor", "toSide": "left"},
+    {"id": "e9", "fromNode": "executor", "fromSide": "bottom", "toNode": "cli", "toSide": "top", "label": "trades"},
+    {"id": "e10", "fromNode": "resolver", "fromSide": "right", "toNode": "cli", "toSide": "left", "label": "P&L"},
+    {"id": "e11", "fromNode": "cli", "fromSide": "right", "toNode": "gates", "toSide": "left"}
+  ]
+}
