@@ -16,6 +16,7 @@ from polyagent.data.repositories.historical import HistoricalRepository
 from polyagent.data.repositories.markets import MarketRepository
 from polyagent.data.repositories.positions import PositionRepository
 from polyagent.data.repositories.thesis import ThesisRepository
+from polyagent.data.repositories.btc5m import Btc5mRepository
 from polyagent.data.repositories.trade_log import TradeLogRepository
 from polyagent.infra.config import Settings
 from polyagent.infra.database import Database
@@ -27,6 +28,7 @@ from polyagent.services.brain import BrainService
 from polyagent.services.classifier import classify
 from polyagent.services.embeddings import EmbeddingsService
 from polyagent.services.executor import ExecutorService
+from polyagent.services.btc5m.worker import run_btc5m_worker
 from polyagent.services.exit_monitor import ExitMonitorService
 from polyagent.services.scanner import ScannerService
 from polyagent.strategies.arbitrage import ArbitrageStrategy
@@ -87,6 +89,7 @@ def run() -> None:
     position_repo = PositionRepository(db)
     historical_repo = HistoricalRepository(db)
     trade_log_repo = TradeLogRepository(db)
+    btc5m_repo = Btc5mRepository(db)
 
     scanner = ScannerService(
         min_gap=settings.min_gap,
@@ -355,6 +358,16 @@ def run() -> None:
     pool.spawn("brain", brain_worker, n_brain)
     pool.spawn("executor", executor_worker, n_executor)
     pool.spawn("exit_monitor", exit_monitor_worker, n_exit)
+
+    if settings.btc5m_enabled:
+        pool.spawn(
+            "btc5m",
+            lambda: run_btc5m_worker(settings, btc5m_repo, polymarket, queues.shutdown),
+            1,
+        )
+        logger.info("btc5m: 1 worker enabled")
+    else:
+        logger.info("btc5m: disabled (set BTC5M_ENABLED=true to enable)")
 
     logger.info(
         "All workers started: %d scanner, %d brain, %d executor, %d exit",
