@@ -8,7 +8,7 @@ from typing import Any
 from uuid import UUID
 
 from polyagent.infra.database import Database
-from polyagent.models import MarketData, MarketStatus, Score
+from polyagent.models import MarketClass, MarketData, MarketStatus, Score
 
 logger = logging.getLogger("polyagent.repositories.markets")
 
@@ -16,11 +16,11 @@ UPSERT_MARKET = """
     INSERT INTO markets (
         polymarket_id, question, category, token_id,
         midpoint_price, bids_depth, asks_depth,
-        hours_to_resolution, volume_24h, status
+        hours_to_resolution, volume_24h, status, market_class
     ) VALUES (
         %(polymarket_id)s, %(question)s, %(category)s, %(token_id)s,
         %(midpoint_price)s, %(bids_depth)s, %(asks_depth)s,
-        %(hours_to_resolution)s, %(volume_24h)s, %(status)s
+        %(hours_to_resolution)s, %(volume_24h)s, %(status)s, %(market_class)s
     )
     ON CONFLICT (polymarket_id) DO UPDATE SET
         midpoint_price = EXCLUDED.midpoint_price,
@@ -28,6 +28,7 @@ UPSERT_MARKET = """
         asks_depth = EXCLUDED.asks_depth,
         hours_to_resolution = EXCLUDED.hours_to_resolution,
         volume_24h = EXCLUDED.volume_24h,
+        market_class = EXCLUDED.market_class,
         scanned_at = NOW()
     RETURNING id
 """
@@ -66,6 +67,7 @@ class MarketRepository:
         Returns:
             The UUID of the upserted market row.
         """
+        market_class = (market.market_class or MarketClass.OTHER).value
         with self._db.cursor() as cur:
             cur.execute(
                 UPSERT_MARKET,
@@ -80,6 +82,7 @@ class MarketRepository:
                     "hours_to_resolution": market.hours_to_resolution,
                     "volume_24h": market.volume_24h,
                     "status": status.value,
+                    "market_class": market_class,
                 },
             )
             row = cur.fetchone()
