@@ -1,6 +1,11 @@
 """Positions command — view open and closed positions."""
 from __future__ import annotations
 
+import json
+from datetime import datetime
+from decimal import Decimal
+from uuid import UUID
+
 import click
 from rich.console import Console
 from rich.table import Table
@@ -10,10 +15,23 @@ from polyagent.infra.database import Database
 from polyagent.data.repositories.positions import PositionRepository
 
 
+def _json_default(obj):
+    if isinstance(obj, Decimal):
+        return float(obj)
+    if isinstance(obj, datetime):
+        return obj.isoformat()
+    if isinstance(obj, UUID):
+        return str(obj)
+    raise TypeError(f"Type {type(obj).__name__} not JSON serializable")
+
+
 @click.command()
 @click.option("--closed", is_flag=True, help="Show closed positions")
 @click.option("--worst", is_flag=True, help="Show worst-performing positions")
-def positions(closed: bool, worst: bool):
+@click.option("--limit", type=int, default=20, show_default=True, help="Max rows to fetch (closed only)")
+@click.option("--all", "all_rows", is_flag=True, help="Fetch all closed positions (overrides --limit)")
+@click.option("--json", "as_json", is_flag=True, help="Emit JSON to stdout instead of a table")
+def positions(closed: bool, worst: bool, limit: int, all_rows: bool, as_json: bool):
     """Show positions. Default: open positions with current P&L."""
     console = Console()
     settings = Settings.from_env()
@@ -21,7 +39,7 @@ def positions(closed: bool, worst: bool):
     repo = PositionRepository(db)
 
     if closed or worst:
-        rows = repo.get_closed(limit=20)
+        rows = repo.get_closed(limit=None if all_rows else limit)
         if worst:
             rows = sorted(rows, key=lambda r: float(r.get("pnl", 0)))
         title = "Worst Positions" if worst else "Closed Positions"
@@ -29,7 +47,12 @@ def positions(closed: bool, worst: bool):
         rows = repo.get_open()
         title = "Open Positions"
 
-    table = Table(title=title)
+    if as_json:
+        click.echo(json.dumps(list(rows), default=_json_default, indent=2))
+        db.close()
+        return
+
+    table = Table(title=f"{title} ({len(rows)})")
     table.add_column("ID", style="dim", max_width=8)
     table.add_column("Market", max_width=40)
     table.add_column("Side", style="cyan")

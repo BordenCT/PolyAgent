@@ -33,12 +33,20 @@ SELECT_OPEN = """
 """
 
 SELECT_CLOSED = """
-    SELECT p.*, m.polymarket_id, m.question
+    SELECT p.*, m.polymarket_id, m.question, m.market_class::text AS market_class
     FROM positions p
     JOIN markets m ON p.market_id = m.id
     WHERE p.status = 'closed'
     ORDER BY p.closed_at DESC
     LIMIT %(limit)s
+"""
+
+SELECT_CLOSED_ALL = """
+    SELECT p.*, m.polymarket_id, m.question, m.market_class::text AS market_class
+    FROM positions p
+    JOIN markets m ON p.market_id = m.id
+    WHERE p.status = 'closed'
+    ORDER BY p.closed_at DESC
 """
 
 CLOSE_POSITION = """
@@ -106,10 +114,13 @@ class PositionRepository:
             cur.execute(SELECT_OPEN)
             return cur.fetchall()
 
-    def get_closed(self, limit: int = 50) -> list[dict]:
-        """Get closed positions."""
+    def get_closed(self, limit: int | None = 50) -> list[dict]:
+        """Get closed positions. Pass `limit=None` for no cap."""
         with self._db.cursor() as cur:
-            cur.execute(SELECT_CLOSED, {"limit": limit})
+            if limit is None:
+                cur.execute(SELECT_CLOSED_ALL)
+            else:
+                cur.execute(SELECT_CLOSED, {"limit": limit})
             return cur.fetchall()
 
     def close(
