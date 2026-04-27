@@ -83,6 +83,12 @@ class Settings:
     ollama_model: str
     ollama_enabled: bool
 
+    # Crypto-quant pipeline (Φ(d₂) for crypto strike markets)
+    crypto_quant_enabled: bool
+    crypto_quant_btc_vol: float
+    crypto_quant_eth_vol: float
+    crypto_quant_spot_poll_s: float
+
     # BTC 5-minute subsystem
     btc5m_enabled: bool
     btc5m_spot_poll_s: float
@@ -147,6 +153,10 @@ class Settings:
             ollama_url=_env_str("OLLAMA_URL", "http://192.168.1.56:11434"),
             ollama_model=_env_str("OLLAMA_MODEL", "phi4:14b"),
             ollama_enabled=_env_bool("OLLAMA_ENABLED", True),
+            crypto_quant_enabled=_env_bool("CRYPTO_QUANT_ENABLED", True),
+            crypto_quant_btc_vol=_env_float("CRYPTO_QUANT_BTC_VOL", 0.60),
+            crypto_quant_eth_vol=_env_float("CRYPTO_QUANT_ETH_VOL", 0.75),
+            crypto_quant_spot_poll_s=_env_float("CRYPTO_QUANT_SPOT_POLL_S", 30.0),
             btc5m_enabled=_env_bool("BTC5M_ENABLED", False),
             btc5m_spot_poll_s=_env_float("BTC5M_SPOT_POLL_S", 2.0),
             btc5m_market_poll_s=_env_int("BTC5M_MARKET_POLL_S", 60),

@@ -14,7 +14,8 @@ logger = logging.getLogger("polyagent.services.scanner")
 # narrow price-range buckets). Buying these is a guaranteed loss because the
 # model has no live price reference and overestimates tail probabilities.
 DEFAULT_QUESTION_BLOCKLIST: tuple[str, ...] = (
-    r"^Will the price of \w+ be (above|below|between)",
+    # Barrier-touch markets ("dip to", "reach") need running-min/max math
+    # we haven't shipped yet. Kill until that's built.
     r"^Will (Bitcoin|Ethereum|Solana) (reach|dip to|hit)",
 )
 

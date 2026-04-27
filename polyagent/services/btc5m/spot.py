@@ -1,4 +1,4 @@
-"""Coinbase BTC/USD spot source with rolling realized-vol.
+"""Coinbase spot source with rolling realized-vol.
 
 Public interface (PriceSource protocol):
     tick()          -> Decimal | None
@@ -20,26 +20,34 @@ import httpx
 
 logger = logging.getLogger("polyagent.services.btc5m.spot")
 
-_COINBASE_TICKER_URL = (
-    "https://api.exchange.coinbase.com/products/BTC-USD/ticker"
+_COINBASE_TICKER_URL_FMT = (
+    "https://api.exchange.coinbase.com/products/{product}/ticker"
 )
 _SECONDS_PER_YEAR = 365.25 * 24 * 3600
 
 
-class BtcSpotSource:
-    """In-memory rolling cache of BTC/USD mid prices from Coinbase."""
+class CoinbaseSpotSource:
+    """In-memory rolling cache of <product> mid prices from Coinbase."""
 
-    def __init__(self, _max_age_s: int = 3600, timeout_s: float = 5.0) -> None:
+    def __init__(
+        self,
+        product: str = "BTC-USD",
+        _max_age_s: int = 3600,
+        timeout_s: float = 5.0,
+    ) -> None:
+        self._product = product
+        self._url = _COINBASE_TICKER_URL_FMT.format(product=product)
         self._max_age_s = _max_age_s
         self._buf: deque[tuple[float, Decimal]] = deque()
         self._http = httpx.Client(timeout=timeout_s)
 
-    def _fetch_ticker(self) -> Decimal:
-        """Fetch the current BTC/USD price from Coinbase, as the mid of bid/ask.
+    @property
+    def product(self) -> str:
+        return self._product
 
-        Raises on HTTP error.
-        """
-        resp = self._http.get(_COINBASE_TICKER_URL)
+    def _fetch_ticker(self) -> Decimal:
+        """Fetch the current mid price from Coinbase. Raises on HTTP error."""
+        resp = self._http.get(self._url)
         resp.raise_for_status()
         body = resp.json()
         bid = Decimal(str(body["bid"]))
@@ -111,3 +119,7 @@ class BtcSpotSource:
     def close(self) -> None:
         """Close the underlying HTTP client."""
         self._http.close()
+
+
+# Back-compat alias used by the btc5m subsystem.
+BtcSpotSource = CoinbaseSpotSource

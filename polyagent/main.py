@@ -25,7 +25,9 @@ from polyagent.infra.pool import WorkerPool
 from polyagent.infra.queues import Queues, ScanResult, ThesisResult
 from polyagent.models import MarketStatus
 from polyagent.services.brain import BrainService
+from polyagent.services.btc5m.spot import CoinbaseSpotSource
 from polyagent.services.classifier import classify
+from polyagent.services.crypto_quant import CryptoQuantService
 from polyagent.services.embeddings import EmbeddingsService
 from polyagent.services.executor import ExecutorService
 from polyagent.services.btc5m.worker import run_btc5m_worker
@@ -100,6 +102,26 @@ def run() -> None:
         max_price=settings.max_price,
         question_blocklist=settings.scanner_question_blocklist,
     )
+    crypto_quant: CryptoQuantService | None = None
+    btc_quant_spot: CoinbaseSpotSource | None = None
+    eth_quant_spot: CoinbaseSpotSource | None = None
+    if settings.crypto_quant_enabled:
+        btc_quant_spot = CoinbaseSpotSource(product="BTC-USD")
+        eth_quant_spot = CoinbaseSpotSource(product="ETH-USD")
+        crypto_quant = CryptoQuantService(
+            btc_spot=btc_quant_spot,
+            eth_spot=eth_quant_spot,
+            btc_vol=settings.crypto_quant_btc_vol,
+            eth_vol=settings.crypto_quant_eth_vol,
+        )
+        # Prime the spot caches so the first scan after startup has data.
+        btc_quant_spot.tick()
+        eth_quant_spot.tick()
+        logger.info(
+            "crypto_quant enabled (btc_vol=%.2f eth_vol=%.2f)",
+            settings.crypto_quant_btc_vol, settings.crypto_quant_eth_vol,
+        )
+
     brain = BrainService(
         llm_evaluator=brain_evaluator,
         embeddings_service=embeddings,
@@ -107,6 +129,7 @@ def run() -> None:
         confidence_threshold=settings.brain_confidence_threshold,
         min_checks=settings.brain_min_checks,
         min_edge=settings.brain_min_edge,
+        crypto_quant=crypto_quant,
     )
     executor = ExecutorService(
         kelly_max_fraction=settings.kelly_max_fraction,
@@ -369,6 +392,18 @@ def run() -> None:
         logger.info("btc5m: 1 worker enabled")
     else:
         logger.info("btc5m: disabled (set BTC5M_ENABLED=true to enable)")
+
+    if crypto_quant is not None and btc_quant_spot is not None and eth_quant_spot is not None:
+        def crypto_quant_spot_worker():
+            """Refresh BTC and ETH spot caches every CRYPTO_QUANT_SPOT_POLL_S seconds."""
+            interval = settings.crypto_quant_spot_poll_s
+            while queues.shutdown.empty():
+                btc_quant_spot.tick()
+                eth_quant_spot.tick()
+                time.sleep(interval)
+
+        pool.spawn("crypto_quant_spot", crypto_quant_spot_worker, 1)
+        logger.info("crypto_quant_spot: 1 worker enabled")
 
     logger.info(
         "All workers started: %d scanner, %d brain, %d executor, %d exit",
