@@ -5,6 +5,7 @@ import click
 
 from polyagent.cli.backtest_cmd import backtest
 from polyagent.cli.btc5m_stats import btc5m_stats
+from polyagent.cli.buy_review import buy_review
 from polyagent.cli.class_stats import class_stats
 from polyagent.cli.ingest_cmd import ingest
 from polyagent.cli.markets import markets, thesis
@@ -41,3 +42,4 @@ cli.add_command(ingest)
 cli.add_command(reset)
 cli.add_command(btc5m_stats)
 cli.add_command(class_stats)
+cli.add_command(buy_review)
