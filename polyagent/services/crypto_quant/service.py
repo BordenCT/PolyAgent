@@ -79,11 +79,14 @@ class CryptoQuantService:
     def _build_thesis_text(
         strike: CryptoStrike, spot: Decimal, vol: float, result: QuantResult
     ) -> str:
-        kind_desc = {
-            StrikeKind.UP: f"spot >= ${strike.strike:,}",
-            StrikeKind.DOWN: f"spot < ${strike.strike:,}",
-            StrikeKind.RANGE: f"${strike.strike:,} <= spot < ${strike.upper_strike:,}",
-        }[strike.kind]
+        # Don't use a dict literal — every value would be evaluated, and
+        # upper_strike is None for UP/DOWN, which TypeErrors on `:,` format.
+        if strike.kind == StrikeKind.UP:
+            kind_desc = f"spot >= ${strike.strike:,}"
+        elif strike.kind == StrikeKind.DOWN:
+            kind_desc = f"spot < ${strike.strike:,}"
+        else:  # RANGE
+            kind_desc = f"${strike.strike:,} <= spot < ${strike.upper_strike:,}"
         return (
             f"[crypto_quant] {strike.asset} {kind_desc} | "
             f"current_spot=${spot:,.2f} sigma={vol:.2f} "
