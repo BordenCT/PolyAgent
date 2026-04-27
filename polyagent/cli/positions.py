@@ -73,8 +73,9 @@ def _print_summary(console: Console, rows: list[dict]) -> None:
 @click.option("--limit", type=int, default=20, show_default=True, help="Max rows to fetch (closed only)")
 @click.option("--all", "all_rows", is_flag=True, help="Fetch all closed positions (overrides --limit)")
 @click.option("--json", "as_json", is_flag=True, help="Emit JSON to stdout instead of a table")
+@click.option("--jsonl", "as_jsonl", is_flag=True, help="Emit one JSON object per line (paste-safe; one row = one line)")
 @click.option("--summary", is_flag=True, help="Print aggregate rollups instead of rows (closed only)")
-def positions(closed: bool, worst: bool, limit: int, all_rows: bool, as_json: bool, summary: bool):
+def positions(closed: bool, worst: bool, limit: int, all_rows: bool, as_json: bool, as_jsonl: bool, summary: bool):
     """Show positions. Default: open positions with current P&L."""
     console = Console()
     settings = Settings.from_env()
@@ -82,7 +83,7 @@ def positions(closed: bool, worst: bool, limit: int, all_rows: bool, as_json: bo
     repo = PositionRepository(db)
 
     if closed or worst or summary:
-        rows = repo.get_closed(limit=None if (all_rows or summary) else limit)
+        rows = repo.get_closed(limit=None if (all_rows or summary or as_jsonl) else limit)
         if worst:
             rows = sorted(rows, key=lambda r: float(r.get("pnl", 0)))
         title = "Worst Positions" if worst else "Closed Positions"
@@ -92,6 +93,12 @@ def positions(closed: bool, worst: bool, limit: int, all_rows: bool, as_json: bo
 
     if summary:
         _print_summary(console, list(rows))
+        db.close()
+        return
+
+    if as_jsonl:
+        for r in rows:
+            click.echo(json.dumps(dict(r), default=_json_default))
         db.close()
         return
 
