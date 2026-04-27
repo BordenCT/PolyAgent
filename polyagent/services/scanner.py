@@ -2,11 +2,21 @@
 from __future__ import annotations
 
 import logging
+import re
 from decimal import Decimal
 
 from polyagent.models import MarketData, Score
 
 logger = logging.getLogger("polyagent.services.scanner")
+
+
+# Patterns the brain has shown it cannot reason about (crypto strike ladders,
+# narrow price-range buckets). Buying these is a guaranteed loss because the
+# model has no live price reference and overestimates tail probabilities.
+DEFAULT_QUESTION_BLOCKLIST: tuple[str, ...] = (
+    r"^Will the price of \w+ be (above|below|between)",
+    r"^Will (Bitcoin|Ethereum|Solana) (reach|dip to|hit)",
+)
 
 
 class ScannerService:
@@ -20,6 +30,7 @@ class ScannerService:
         max_hours: float,
         min_price: float = 0.02,
         max_price: float = 0.98,
+        question_blocklist: tuple[str, ...] = DEFAULT_QUESTION_BLOCKLIST,
     ) -> None:
         self._min_gap = min_gap
         self._min_depth = min_depth
@@ -27,6 +38,10 @@ class ScannerService:
         self._max_hours = max_hours
         self._min_price = min_price
         self._max_price = max_price
+        self._blocklist = tuple(re.compile(p, re.IGNORECASE) for p in question_blocklist)
+
+    def _is_blocked(self, question: str) -> bool:
+        return any(p.search(question or "") for p in self._blocklist)
 
     def score_market(
         self, market: MarketData, historical_estimate: float
@@ -46,6 +61,9 @@ class ScannerService:
         hours_left = market.hours_to_resolution
 
         # Kill filters
+        if self._is_blocked(market.question):
+            logger.debug("KILL %s — blocklisted: %s", market.polymarket_id, market.question[:60])
+            return None
         if gap <= self._min_gap:
             logger.debug("KILL %s — gap %.3f too thin", market.polymarket_id, gap)
             return None
@@ -81,7 +99,7 @@ class ScannerService:
             List of (market, score) tuples for markets that passed all filters.
         """
         survivors = []
-        killed_gap = killed_depth = killed_hours = killed_price = 0
+        killed_gap = killed_depth = killed_hours = killed_price = killed_blocked = 0
         for market in markets:
             # Fallback to 0.5 (neutral prior), NOT midpoint — midpoint fallback zeros the gap
             estimate = estimates.get(market.polymarket_id, 0.5)
@@ -90,6 +108,9 @@ class ScannerService:
             depth = float(market.min_depth)
             hours = market.hours_to_resolution
 
+            if self._is_blocked(market.question):
+                killed_blocked += 1
+                continue
             if price < self._min_price or price > self._max_price:
                 killed_price += 1
                 continue
@@ -107,9 +128,10 @@ class ScannerService:
             survivors.append((market, Score(gap=round(gap, 3), depth=depth, hours=hours, ev=ev)))
 
         logger.info(
-            "Scanned %d markets -> %d survivors | killed: price=%d gap=%d depth=%d hours=%d",
+            "Scanned %d markets -> %d survivors | killed: blocklist=%d price=%d gap=%d depth=%d hours=%d",
             len(markets),
             len(survivors),
+            killed_blocked,
             killed_price,
             killed_gap,
             killed_depth,

@@ -13,6 +13,7 @@ from polyagent.cli.performance import perf
 from polyagent.cli.positions import positions
 from polyagent.cli.reset import reset
 from polyagent.cli.status import status
+from polyagent.cli.thesis_stats import thesis_stats
 
 
 @click.group()
@@ -43,3 +44,4 @@ cli.add_command(reset)
 cli.add_command(btc5m_stats)
 cli.add_command(class_stats)
 cli.add_command(buy_review)
+cli.add_command(thesis_stats)

@@ -98,6 +98,7 @@ def run() -> None:
         max_hours=settings.max_hours,
         min_price=settings.min_price,
         max_price=settings.max_price,
+        question_blocklist=settings.scanner_question_blocklist,
     )
     brain = BrainService(
         llm_evaluator=brain_evaluator,

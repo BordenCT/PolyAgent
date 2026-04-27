@@ -30,6 +30,16 @@ def _env_bool(key: str, default: bool) -> bool:
     return val in ("true", "1", "yes")
 
 
+def _load_blocklist() -> tuple[str, ...]:
+    """Build scanner question blocklist. SCANNER_QUESTION_BLOCKLIST is comma-
+    separated regexes; if unset, fall back to the default crypto-ladder set."""
+    from polyagent.services.scanner import DEFAULT_QUESTION_BLOCKLIST
+    raw = os.environ.get("SCANNER_QUESTION_BLOCKLIST")
+    if raw is None:
+        return DEFAULT_QUESTION_BLOCKLIST
+    return tuple(p.strip() for p in raw.split(",") if p.strip())
+
+
 @dataclass(frozen=True)
 class Settings:
     """Immutable application settings loaded from environment variables."""
@@ -43,6 +53,7 @@ class Settings:
     max_hours: float
     min_price: float
     max_price: float
+    scanner_question_blocklist: tuple[str, ...]
     anthropic_api_key: str
     brain_confidence_threshold: float
     brain_min_checks: int
@@ -106,6 +117,7 @@ class Settings:
             max_hours=_env_float("MAX_HOURS", 168.0),
             min_price=_env_float("MIN_PRICE", 0.02),
             max_price=_env_float("MAX_PRICE", 0.98),
+            scanner_question_blocklist=_load_blocklist(),
             anthropic_api_key=_env_str("ANTHROPIC_API_KEY", ""),
             brain_confidence_threshold=_env_float("BRAIN_CONFIDENCE_THRESHOLD", 0.75),
             brain_min_checks=_env_int("BRAIN_MIN_CHECKS", 3),

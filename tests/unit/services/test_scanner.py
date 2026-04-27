@@ -59,6 +59,33 @@ class TestScoreMarket:
         score = self.scanner.score_market(market, historical_estimate)
         assert score is None
 
+    def test_default_blocklist_kills_btc_ladder(self):
+        market = self._make_market(question="Will the price of Bitcoin be above $80,000 on April 26?")
+        score = self.scanner.score_market(market, 0.60)
+        assert score is None
+
+    def test_default_blocklist_kills_btc_dip(self):
+        market = self._make_market(question="Will Bitcoin dip to $77,000 on April 25?")
+        score = self.scanner.score_market(market, 0.60)
+        assert score is None
+
+    def test_blocklist_does_not_kill_sports(self):
+        market = self._make_market(question="Madrid Open: Sinner vs Bonzi")
+        score = self.scanner.score_market(market, 0.55)
+        assert score is not None
+
+    def test_custom_blocklist_overrides_default(self):
+        scanner = ScannerService(
+            min_gap=0.07, min_depth=500.0, min_hours=4.0, max_hours=168.0,
+            question_blocklist=(r"^UFC ",),
+        )
+        # BTC ladder no longer blocked under custom list:
+        m1 = self._make_market(question="Will the price of Bitcoin be above $80,000 on April 26?")
+        assert scanner.score_market(m1, 0.60) is not None
+        # UFC now blocked:
+        m2 = self._make_market(question="UFC Fight Night: Eric McConico vs. Rodolfo Vieira")
+        assert scanner.score_market(m2, 0.60) is None
+
     def test_too_slow_rejected(self):
         market = self._make_market(hours_to_resolution=200.0)
         historical_estimate = 0.55
