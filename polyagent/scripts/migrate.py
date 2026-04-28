@@ -79,6 +79,15 @@ def get_applied(conn: psycopg.Connection) -> dict[str, AppliedRecord]:
     }
 
 
+def _record_applied(cur: psycopg.Cursor, m: Migration) -> None:
+    """Insert a row into schema_migrations for the given migration."""
+    cur.execute(
+        "INSERT INTO schema_migrations (version, filename, checksum) "
+        "VALUES (%s, %s, %s)",
+        (m.version, m.filename, m.checksum),
+    )
+
+
 def apply_migration(conn: psycopg.Connection, m: Migration) -> None:
     """Execute the migration in a transaction, then record it.
 
@@ -88,11 +97,7 @@ def apply_migration(conn: psycopg.Connection, m: Migration) -> None:
     with conn.transaction():
         with conn.cursor() as cur:
             cur.execute(m.sql)
-            cur.execute(
-                "INSERT INTO schema_migrations (version, filename, checksum) "
-                "VALUES (%s, %s, %s)",
-                (m.version, m.filename, m.checksum),
-            )
+            _record_applied(cur, m)
 
 
 class DriftError(RuntimeError):
@@ -144,17 +149,12 @@ def migrate_baseline(conn: psycopg.Connection, migrations_dir: Path) -> list[Mig
     found = discover_migrations(migrations_dir)
     applied = get_applied(conn)
     recorded: list[Migration] = []
-    with conn.cursor() as cur:
+    with conn.transaction(), conn.cursor() as cur:
         for m in found:
             if m.version in applied:
                 continue
-            cur.execute(
-                "INSERT INTO schema_migrations (version, filename, checksum) "
-                "VALUES (%s, %s, %s)",
-                (m.version, m.filename, m.checksum),
-            )
+            _record_applied(cur, m)
             recorded.append(m)
-    conn.commit()
     return recorded
 
 
