@@ -1,0 +1,126 @@
+{
+  "nodes": [
+    {
+      "id": "title",
+      "type": "text",
+      "x": -700,
+      "y": -800,
+      "width": 600,
+      "height": 80,
+      "text": "# Multi-Asset Quant Subsystem Refactor\n\nUnify `btc5m/` + `crypto_quant/` → `services/quant/`."
+    },
+    {
+      "id": "registry",
+      "type": "text",
+      "x": -400,
+      "y": -600,
+      "width": 360,
+      "height": 280,
+      "color": "4",
+      "text": "## quant/assets/\n\n**registry.py** — `ASSETS = {asset_id: AssetSpec}`\n\n**spec.py** — `AssetSpec` (frozen dataclass)\n- `asset_id`, `asset_class`\n- `price_source` factory\n- `settlement_source` factory\n- `default_vol`, `vol_calibration`\n- `supported_market_families`\n- `paper_only`, `fee_bps`\n- `edge_threshold`, `tick_interval_s`\n- `slug_token`, `question_keywords`\n\n**sources/** — `coinbase.py`, future `chainlink.py`, `fx.py`, `lbma.py`"
+    },
+    {
+      "id": "core",
+      "type": "text",
+      "x": 100,
+      "y": -600,
+      "width": 320,
+      "height": 240,
+      "color": "4",
+      "text": "## quant/core/\n\nShared math, no I/O.\n\n**estimator.py** — Φ(d₂) lognormal P(up). Moved from `btc5m/`.\n\n**vol.py** — `compute_vol(spec, source, horizon_s)`. Per-tenor lookback: ROLLING_REALIZED / FIXED / HYBRID. One call site for vol math.\n\n**pnl.py** — binary-option payoff. Moved from `btc5m/resolver`."
+    },
+    {
+      "id": "short_horizon",
+      "type": "text",
+      "x": -700,
+      "y": -260,
+      "width": 360,
+      "height": 240,
+      "color": "5",
+      "text": "## quant/short_horizon/\n\nBinary up/down markets (e.g. `btc-updown-5m-…`).\n\n**scanner.py** — generalized slug regex per asset.\n**decider.py** — registry-aware paper/live executor.\n**resolver.py** — writes `price_source_id` audit field.\n**repository.py** — `quant_short_markets`, `quant_short_trades` CRUD.\n\nReplaces today's `btc5m/` package."
+    },
+    {
+      "id": "strike",
+      "type": "text",
+      "x": -280,
+      "y": -260,
+      "width": 360,
+      "height": 240,
+      "color": "5",
+      "text": "## quant/strike/\n\nLong-horizon strike markets ('Will BTC be above $X on …').\n\n**parser.py** — generalized question parser, iterates registry.\n**service.py** — `QuantStrikeService` (replaces `CryptoQuantService`).\n\nNo own tables; results flow through main bot's `positions` pipeline.\n\nBrain integration: one-line import change."
+    },
+    {
+      "id": "orchestrator",
+      "type": "text",
+      "x": 140,
+      "y": -260,
+      "width": 360,
+      "height": 320,
+      "color": "5",
+      "text": "## quant/orchestrator.py\n\nSingle worker thread. Replaces `run_btc5m_worker`.\n\n**Owns:**\n- `dict[asset_id, PriceSource]`\n- `dict[asset_id, SettlementSource]`\n- decider, scanner, resolver\n\n**Loop:**\n1. Per-asset tick (per `spec.tick_interval_s`)\n2. Every `market_interval_s`: scan → decide → resolve\n3. `safely(fn, *args)` wraps each per-asset op (fault isolation)\n\n**Sleep:** `min(tick_interval_s for enabled assets)`"
+    },
+    {
+      "id": "db",
+      "type": "text",
+      "x": -700,
+      "y": 100,
+      "width": 360,
+      "height": 240,
+      "color": "6",
+      "text": "## Database changes\n\n**Migration 006** — ALTER TABLE renames:\n- `btc5m_markets` → `quant_short_markets`\n- `btc5m_trades`  → `quant_short_trades`\n- All indexes renamed\n- `+ asset_id TEXT NOT NULL` (default 'BTC' then drop)\n- `+ price_source_id TEXT` (basis audit)\n\n**schema_migrations** table created by runner on first invocation."
+    },
+    {
+      "id": "runner",
+      "type": "text",
+      "x": -280,
+      "y": 100,
+      "width": 360,
+      "height": 280,
+      "color": "6",
+      "text": "## polyagent/scripts/migrate.py\n\n`polyagent migrate {up,status,baseline}`\n\n**up** — apply pending migrations in lex order, each in its own transaction. Detect checksum drift on already-applied files and fail loudly.\n\n**status** — print applied / pending / drifted.\n\n**baseline** — record existing migration files as applied without executing them. Used once on prod to seed `schema_migrations` with versions 001-005.\n\nWired as `ExecStartPre=migrate up` on bot startup. CI runs against ephemeral Postgres on every PR."
+    },
+    {
+      "id": "brain",
+      "type": "text",
+      "x": 140,
+      "y": 100,
+      "width": 360,
+      "height": 200,
+      "color": "5",
+      "text": "## polyagent/services/brain.py\n\nOnly change: import\n```python\n- from polyagent.services.crypto_quant import CryptoQuantService\n+ from polyagent.services.quant.strike import QuantStrikeService\n```\n\nSurface (`matches`, `evaluate`) is identical. Existing brain tests act as regression suite for PR 4."
+    },
+    {
+      "id": "build_sequence",
+      "type": "text",
+      "x": -400,
+      "y": 440,
+      "width": 800,
+      "height": 320,
+      "color": "3",
+      "text": "## Build sequence — six PRs, prod stays green\n\n1. **Migration runner + schema_migrations.** No app behavior. Deploy, run `migrate baseline`, wire `migrate up` into startup.\n2. **Move estimator + extract `compute_vol` to `quant/core/`.** Old import paths re-exported.\n3. **`AssetSpec` + registry + Coinbase source under `quant/assets/`.** Pure addition; nothing consumes the registry yet.\n4. **`crypto_quant` → `quant/strike`.** One-line brain.py import change. `crypto_quant/` deleted.\n5. **Migration 006 + repository rename.** Tables renamed; `Btc5mRepository` → `QuantShortRepository`. Run `migrate up` on deploy.\n6. **Orchestrator replaces `run_btc5m_worker`; decider/scanner/resolver consume registry.** `btc5m/` deleted. Env vars renamed (`BTC5M_*` → `QUANT_SHORT_*`, `QUANT_<ASSET>_*` overrides per Q8). One-time `.env` update.\n\nAfter PR 6: BTC + ETH live (same as today). Adding a new asset = one `AssetSpec` entry + maybe one `PriceSource` class."
+    },
+    {
+      "id": "non_goals",
+      "type": "text",
+      "x": 480,
+      "y": 100,
+      "width": 320,
+      "height": 280,
+      "color": "1",
+      "text": "## Non-goals (this refactor)\n\n- No new asset classes (FX, commodities, SOL, XRP).\n- No `quant_strike_*` paper-trade tables.\n- No Chainlink source implementation.\n- No `LIVE_ENABLED` flip for new assets.\n- No backtest engine integration.\n- No automatic `paper_only` detection.\n\nAll deferred as follow-up tickets."
+    }
+  ],
+  "edges": [
+    {"id": "e1", "fromNode": "registry", "fromSide": "right", "toNode": "core",         "toSide": "left"},
+    {"id": "e2", "fromNode": "registry", "fromSide": "bottom", "toNode": "short_horizon", "toSide": "top"},
+    {"id": "e3", "fromNode": "registry", "fromSide": "bottom", "toNode": "strike",       "toSide": "top"},
+    {"id": "e4", "fromNode": "registry", "fromSide": "bottom", "toNode": "orchestrator", "toSide": "top"},
+    {"id": "e5", "fromNode": "core",     "fromSide": "bottom", "toNode": "short_horizon", "toSide": "top"},
+    {"id": "e6", "fromNode": "core",     "fromSide": "bottom", "toNode": "strike",       "toSide": "top"},
+    {"id": "e7", "fromNode": "orchestrator", "fromSide": "bottom", "toNode": "db",      "toSide": "top"},
+    {"id": "e8", "fromNode": "short_horizon", "fromSide": "bottom", "toNode": "db",      "toSide": "top"},
+    {"id": "e9", "fromNode": "strike",   "fromSide": "right",  "toNode": "brain",        "toSide": "left"},
+    {"id": "e10", "fromNode": "runner",  "fromSide": "left",   "toNode": "db",           "toSide": "right"},
+    {"id": "e11", "fromNode": "orchestrator", "fromSide": "right", "toNode": "brain",   "toSide": "right", "label": "shares PriceSource dict"}
+  ]
+}
