@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 import psycopg
@@ -55,3 +56,24 @@ def discover_migrations(directory: Path) -> list[Migration]:
         checksum = hashlib.sha256(sql.encode("utf-8")).hexdigest()
         out.append(Migration(version=version, filename=path.name, sql=sql, checksum=checksum))
     return out
+
+
+@dataclass(frozen=True)
+class AppliedRecord:
+    version: str
+    filename: str
+    checksum: str
+    applied_at: datetime
+
+
+def get_applied(conn: psycopg.Connection) -> dict[str, AppliedRecord]:
+    """Return {version: AppliedRecord} for all rows in schema_migrations."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT version, filename, checksum, applied_at FROM schema_migrations"
+        )
+        rows = cur.fetchall()
+    return {
+        r[0]: AppliedRecord(version=r[0], filename=r[1], checksum=r[2], applied_at=r[3])
+        for r in rows
+    }
