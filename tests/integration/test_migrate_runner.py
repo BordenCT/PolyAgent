@@ -6,6 +6,8 @@ import psycopg
 
 from polyagent.scripts.migrate import (
     AppliedRecord,
+    Migration,
+    apply_migration,
     ensure_schema_migrations_table,
     get_applied,
 )
@@ -53,3 +55,40 @@ def test_get_applied_reflects_inserted_rows(empty_db_url):
     assert "001" in applied
     assert applied["001"].filename == "001_first.sql"
     assert applied["001"].checksum == "abc"
+
+
+@pytest.mark.integration
+def test_apply_migration_runs_sql_and_records_row(empty_db_url):
+    m = Migration(
+        version="100",
+        filename="100_make_table.sql",
+        sql="CREATE TABLE widget (id INT PRIMARY KEY);",
+        checksum="deadbeef",
+    )
+    with psycopg.connect(empty_db_url) as conn:
+        ensure_schema_migrations_table(conn)
+        apply_migration(conn, m)
+        with conn.cursor() as cur:
+            cur.execute("SELECT 1 FROM information_schema.tables WHERE table_name = 'widget'")
+            assert cur.fetchone() is not None
+        applied = get_applied(conn)
+    assert "100" in applied
+    assert applied["100"].checksum == "deadbeef"
+
+
+@pytest.mark.integration
+def test_apply_migration_rolls_back_on_sql_error(empty_db_url):
+    m = Migration(
+        version="200",
+        filename="200_bad.sql",
+        sql="CREATE TABLE good (id INT); SELECT * FROM nonexistent;",
+        checksum="abc",
+    )
+    with psycopg.connect(empty_db_url) as conn:
+        ensure_schema_migrations_table(conn)
+        with pytest.raises(psycopg.errors.UndefinedTable):
+            apply_migration(conn, m)
+        with conn.cursor() as cur:
+            cur.execute("SELECT 1 FROM information_schema.tables WHERE table_name = 'good'")
+            assert cur.fetchone() is None
+        assert get_applied(conn) == {}
