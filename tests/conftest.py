@@ -34,3 +34,34 @@ def settings() -> Settings:
     }
     with patch.dict(os.environ, overrides, clear=False):
         return Settings.from_env()
+
+
+import uuid
+import psycopg
+
+
+@pytest.fixture
+def empty_db_url():
+    """Yield a connection URL to a fresh empty database; drop on teardown.
+
+    Requires POLYAGENT_TEST_DB_URL env var pointing at a Postgres superuser
+    URL on a server we can CREATE/DROP DATABASE against.
+    """
+    base = os.environ.get("POLYAGENT_TEST_DB_URL")
+    if not base:
+        pytest.skip("POLYAGENT_TEST_DB_URL not set")
+    db_name = f"polyagent_test_{uuid.uuid4().hex[:12]}"
+    admin = psycopg.connect(base, autocommit=True)
+    try:
+        with admin.cursor() as cur:
+            cur.execute(f'CREATE DATABASE "{db_name}"')
+        target_url = base.rsplit("/", 1)[0] + f"/{db_name}"
+        with psycopg.connect(target_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute('CREATE EXTENSION IF NOT EXISTS "uuid-ossp"')
+            conn.commit()
+        yield target_url
+    finally:
+        with admin.cursor() as cur:
+            cur.execute(f'DROP DATABASE IF EXISTS "{db_name}" WITH (FORCE)')
+        admin.close()
