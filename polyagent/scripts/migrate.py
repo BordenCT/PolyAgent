@@ -115,3 +115,14 @@ def plan_actions(
                 f"applied={rec.checksum[:12]}... file={m.checksum[:12]}..."
             )
     return pending
+
+
+def migrate_up(conn: psycopg.Connection, migrations_dir: Path) -> list[Migration]:
+    """Apply all pending migrations. Return the list of migrations applied."""
+    ensure_schema_migrations_table(conn)
+    found = discover_migrations(migrations_dir)
+    applied = get_applied(conn)
+    pending = plan_actions(found, applied)
+    for m in pending:
+        apply_migration(conn, m)
+    return pending

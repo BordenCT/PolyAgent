@@ -6,10 +6,12 @@ import psycopg
 
 from polyagent.scripts.migrate import (
     AppliedRecord,
+    DriftError,
     Migration,
     apply_migration,
     ensure_schema_migrations_table,
     get_applied,
+    migrate_up,
 )
 
 
@@ -92,3 +94,39 @@ def test_apply_migration_rolls_back_on_sql_error(empty_db_url):
             cur.execute("SELECT 1 FROM information_schema.tables WHERE table_name = 'good'")
             assert cur.fetchone() is None
         assert get_applied(conn) == {}
+
+
+@pytest.mark.integration
+def test_migrate_up_applies_all_pending(empty_db_url, tmp_path):
+    (tmp_path / "001_a.sql").write_text("CREATE TABLE a (id INT);")
+    (tmp_path / "002_b.sql").write_text("CREATE TABLE b (id INT);")
+    with psycopg.connect(empty_db_url) as conn:
+        applied = migrate_up(conn, tmp_path)
+    assert [m.version for m in applied] == ["001", "002"]
+    with psycopg.connect(empty_db_url) as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT table_name FROM information_schema.tables "
+            "WHERE table_name IN ('a', 'b') ORDER BY table_name"
+        )
+        names = [r[0] for r in cur.fetchall()]
+    assert names == ["a", "b"]
+
+
+@pytest.mark.integration
+def test_migrate_up_is_noop_on_second_run(empty_db_url, tmp_path):
+    (tmp_path / "001_a.sql").write_text("CREATE TABLE a (id INT);")
+    with psycopg.connect(empty_db_url) as conn:
+        first = migrate_up(conn, tmp_path)
+        second = migrate_up(conn, tmp_path)
+    assert [m.version for m in first] == ["001"]
+    assert second == []
+
+
+@pytest.mark.integration
+def test_migrate_up_raises_drift_after_file_edit(empty_db_url, tmp_path):
+    (tmp_path / "001_a.sql").write_text("CREATE TABLE a (id INT);")
+    with psycopg.connect(empty_db_url) as conn:
+        migrate_up(conn, tmp_path)
+        (tmp_path / "001_a.sql").write_text("CREATE TABLE a (id INT, extra TEXT);")
+        with pytest.raises(DriftError):
+            migrate_up(conn, tmp_path)
