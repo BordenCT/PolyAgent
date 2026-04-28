@@ -51,7 +51,7 @@ def discover_migrations(directory: Path) -> list[Migration]:
         raise FileNotFoundError(f"migrations directory not found: {directory}")
     out: list[Migration] = []
     for path in sorted(directory.glob("*.sql")):
-        sql = path.read_text()
+        sql = path.read_text(encoding="utf-8")
         version = path.name.split("_", 1)[0]
         checksum = hashlib.sha256(sql.encode("utf-8")).hexdigest()
         out.append(Migration(version=version, filename=path.name, sql=sql, checksum=checksum))
@@ -77,3 +77,22 @@ def get_applied(conn: psycopg.Connection) -> dict[str, AppliedRecord]:
         r[0]: AppliedRecord(version=r[0], filename=r[1], checksum=r[2], applied_at=r[3])
         for r in rows
     }
+
+
+def apply_migration(conn: psycopg.Connection, m: Migration) -> None:
+    """Execute the migration in a transaction, then record it.
+
+    On any error the transaction is rolled back and the exception re-raised.
+    """
+    try:
+        with conn.transaction():
+            with conn.cursor() as cur:
+                cur.execute(m.sql)
+                cur.execute(
+                    "INSERT INTO schema_migrations (version, filename, checksum) "
+                    "VALUES (%s, %s, %s)",
+                    (m.version, m.filename, m.checksum),
+                )
+    except Exception:
+        conn.rollback()
+        raise
