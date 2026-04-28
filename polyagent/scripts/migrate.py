@@ -82,20 +82,17 @@ def get_applied(conn: psycopg.Connection) -> dict[str, AppliedRecord]:
 def apply_migration(conn: psycopg.Connection, m: Migration) -> None:
     """Execute the migration in a transaction, then record it.
 
-    On any error the transaction is rolled back and the exception re-raised.
+    On any error the transaction is rolled back (by conn.transaction())
+    and the exception propagates.
     """
-    try:
-        with conn.transaction():
-            with conn.cursor() as cur:
-                cur.execute(m.sql)
-                cur.execute(
-                    "INSERT INTO schema_migrations (version, filename, checksum) "
-                    "VALUES (%s, %s, %s)",
-                    (m.version, m.filename, m.checksum),
-                )
-    except Exception:
-        conn.rollback()
-        raise
+    with conn.transaction():
+        with conn.cursor() as cur:
+            cur.execute(m.sql)
+            cur.execute(
+                "INSERT INTO schema_migrations (version, filename, checksum) "
+                "VALUES (%s, %s, %s)",
+                (m.version, m.filename, m.checksum),
+            )
 
 
 class DriftError(RuntimeError):
