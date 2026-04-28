@@ -117,6 +117,7 @@ def positions(closed: bool, worst: bool, limit: int, all_rows: bool, as_json: bo
     table.add_column("P&L", justify="right")
     if closed or worst:
         table.add_column("Exit", style="yellow")
+        table.add_column("Closed (UTC)", style="dim")
 
     for r in rows:
         pnl = float(r.get("pnl", 0))
@@ -132,6 +133,8 @@ def positions(closed: bool, worst: bool, limit: int, all_rows: bool, as_json: bo
         ]
         if closed or worst:
             row.append(r.get("exit_reason", "N/A"))
+            ca = r.get("closed_at")
+            row.append(ca.strftime("%b %d %H:%M") if ca else "N/A")
         table.add_row(*row)
 
     console.print(table)
