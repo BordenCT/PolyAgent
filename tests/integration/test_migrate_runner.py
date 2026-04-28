@@ -11,6 +11,8 @@ from polyagent.scripts.migrate import (
     apply_migration,
     ensure_schema_migrations_table,
     get_applied,
+    migrate_baseline,
+    migrate_status,
     migrate_up,
 )
 
@@ -130,3 +132,30 @@ def test_migrate_up_raises_drift_after_file_edit(empty_db_url, tmp_path):
         (tmp_path / "001_a.sql").write_text("CREATE TABLE a (id INT, extra TEXT);")
         with pytest.raises(DriftError):
             migrate_up(conn, tmp_path)
+
+
+@pytest.mark.integration
+def test_migrate_baseline_records_files_without_executing(empty_db_url, tmp_path):
+    (tmp_path / "001_a.sql").write_text("RAISE syntax_error_intentional;")
+    with psycopg.connect(empty_db_url) as conn:
+        recorded = migrate_baseline(conn, tmp_path)
+        assert [m.version for m in recorded] == ["001"]
+        with conn.cursor() as cur:
+            cur.execute("SELECT 1 FROM information_schema.tables WHERE table_name = 'a'")
+            assert cur.fetchone() is None
+        applied = get_applied(conn)
+    assert "001" in applied
+
+
+@pytest.mark.integration
+def test_migrate_status_lists_applied_pending_drifted(empty_db_url, tmp_path):
+    (tmp_path / "001_a.sql").write_text("CREATE TABLE a (id INT);")
+    (tmp_path / "002_b.sql").write_text("CREATE TABLE b (id INT);")
+    with psycopg.connect(empty_db_url) as conn:
+        migrate_up(conn, tmp_path)
+        (tmp_path / "002_b.sql").write_text("CREATE TABLE b (id INT, x TEXT);")
+        (tmp_path / "003_c.sql").write_text("CREATE TABLE c (id INT);")
+        report = migrate_status(conn, tmp_path)
+    assert [m.version for m in report.applied] == ["001"]
+    assert [m.version for m in report.pending] == ["003"]
+    assert [m.version for m in report.drifted] == ["002"]
