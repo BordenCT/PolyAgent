@@ -9,6 +9,7 @@ from polyagent.cli.buy_review import buy_review
 from polyagent.cli.class_stats import class_stats
 from polyagent.cli.ingest_cmd import ingest
 from polyagent.cli.markets import markets, thesis
+from polyagent.cli.migrate_cmd import migrate
 from polyagent.cli.performance import perf
 from polyagent.cli.positions import positions
 from polyagent.cli.reset import reset
@@ -45,3 +46,4 @@ cli.add_command(btc5m_stats)
 cli.add_command(class_stats)
 cli.add_command(buy_review)
 cli.add_command(thesis_stats)
+cli.add_command(migrate)
