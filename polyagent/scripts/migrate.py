@@ -126,3 +126,52 @@ def migrate_up(conn: psycopg.Connection, migrations_dir: Path) -> list[Migration
     for m in pending:
         apply_migration(conn, m)
     return pending
+
+
+@dataclass(frozen=True)
+class StatusReport:
+    applied: list[Migration]   # checksum matches
+    pending: list[Migration]   # not in schema_migrations
+    drifted: list[Migration]   # in schema_migrations but checksum differs
+
+
+def migrate_baseline(conn: psycopg.Connection, migrations_dir: Path) -> list[Migration]:
+    """Record all migration files as applied without executing them.
+
+    Skips any version already in schema_migrations.
+    """
+    ensure_schema_migrations_table(conn)
+    found = discover_migrations(migrations_dir)
+    applied = get_applied(conn)
+    recorded: list[Migration] = []
+    with conn.cursor() as cur:
+        for m in found:
+            if m.version in applied:
+                continue
+            cur.execute(
+                "INSERT INTO schema_migrations (version, filename, checksum) "
+                "VALUES (%s, %s, %s)",
+                (m.version, m.filename, m.checksum),
+            )
+            recorded.append(m)
+    conn.commit()
+    return recorded
+
+
+def migrate_status(conn: psycopg.Connection, migrations_dir: Path) -> StatusReport:
+    """Categorise migrations as applied / pending / drifted."""
+    ensure_schema_migrations_table(conn)
+    found = discover_migrations(migrations_dir)
+    applied_map = get_applied(conn)
+    applied: list[Migration] = []
+    pending: list[Migration] = []
+    drifted: list[Migration] = []
+    for m in found:
+        rec = applied_map.get(m.version)
+        if rec is None:
+            pending.append(m)
+        elif rec.checksum == m.checksum:
+            applied.append(m)
+        else:
+            drifted.append(m)
+    return StatusReport(applied=applied, pending=pending, drifted=drifted)
