@@ -1,8 +1,12 @@
 """Shared test fixtures."""
 from __future__ import annotations
 import os
+import uuid
 from unittest.mock import patch
+
+import psycopg
 import pytest
+
 from polyagent.infra.config import Settings
 
 
@@ -34,10 +38,6 @@ def settings() -> Settings:
     }
     with patch.dict(os.environ, overrides, clear=False):
         return Settings.from_env()
-
-
-import uuid
-import psycopg
 
 
 @pytest.fixture
