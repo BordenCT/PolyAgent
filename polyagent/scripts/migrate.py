@@ -96,3 +96,25 @@ def apply_migration(conn: psycopg.Connection, m: Migration) -> None:
     except Exception:
         conn.rollback()
         raise
+
+
+class DriftError(RuntimeError):
+    """Raised when an applied migration's checksum does not match its file."""
+
+
+def plan_actions(
+    found: list[Migration], applied: dict[str, AppliedRecord]
+) -> list[Migration]:
+    """Return migrations needing application, in order. Raise DriftError on mismatch."""
+    pending: list[Migration] = []
+    for m in found:
+        rec = applied.get(m.version)
+        if rec is None:
+            pending.append(m)
+            continue
+        if rec.checksum != m.checksum:
+            raise DriftError(
+                f"checksum drift on version {m.version} ({m.filename}): "
+                f"applied={rec.checksum[:12]}... file={m.checksum[:12]}..."
+            )
+    return pending
