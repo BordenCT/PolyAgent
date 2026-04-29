@@ -16,7 +16,6 @@ from polyagent.data.repositories.historical import HistoricalRepository
 from polyagent.data.repositories.markets import MarketRepository
 from polyagent.data.repositories.positions import PositionRepository
 from polyagent.data.repositories.thesis import ThesisRepository
-from polyagent.data.repositories.btc5m import Btc5mRepository
 from polyagent.data.repositories.trade_log import TradeLogRepository
 from polyagent.infra.config import Settings
 from polyagent.infra.database import Database
@@ -25,13 +24,20 @@ from polyagent.infra.pool import WorkerPool
 from polyagent.infra.queues import Queues, ScanResult, ThesisResult
 from polyagent.models import MarketStatus
 from polyagent.services.brain import BrainService
-from polyagent.services.btc5m.spot import CoinbaseSpotSource
 from polyagent.services.classifier import classify
-from polyagent.services.quant.strike import QuantStrikeService as CryptoQuantService
 from polyagent.services.embeddings import EmbeddingsService
 from polyagent.services.executor import ExecutorService
-from polyagent.services.btc5m.worker import run_btc5m_worker
 from polyagent.services.exit_monitor import ExitMonitorService
+from polyagent.services.quant.assets.registry import apply_env_overrides, enabled_for
+from polyagent.services.quant.assets.spec import MarketFamily
+from polyagent.services.quant.assets.sources.coinbase import CoinbaseSpotSource
+from polyagent.services.quant.orchestrator import run_quant_orchestrator
+from polyagent.services.quant.short_horizon.book import PolymarketBookFetcher
+from polyagent.services.quant.short_horizon.decider import QuantDecider
+from polyagent.services.quant.short_horizon.repository import QuantShortRepository
+from polyagent.services.quant.short_horizon.resolver import QuantResolver
+from polyagent.services.quant.short_horizon.scanner import QuantShortScanner
+from polyagent.services.quant.strike import QuantStrikeService
 from polyagent.services.scanner import ScannerService
 from polyagent.strategies.arbitrage import ArbitrageStrategy
 from polyagent.strategies.convergence import ConvergenceStrategy
@@ -91,7 +97,7 @@ def run() -> None:
     position_repo = PositionRepository(db)
     historical_repo = HistoricalRepository(db)
     trade_log_repo = TradeLogRepository(db)
-    btc5m_repo = Btc5mRepository(db)
+    quant_short_repo = QuantShortRepository(db)
 
     scanner = ScannerService(
         min_gap=settings.min_gap,
@@ -102,20 +108,37 @@ def run() -> None:
         max_price=settings.max_price,
         question_blocklist=settings.scanner_question_blocklist,
     )
-    crypto_quant: CryptoQuantService | None = None
-    btc_quant_spot: CoinbaseSpotSource | None = None
-    eth_quant_spot: CoinbaseSpotSource | None = None
-    if settings.crypto_quant_enabled:
-        btc_quant_spot = CoinbaseSpotSource(product="BTC-USD")
-        eth_quant_spot = CoinbaseSpotSource(product="ETH-USD")
-        crypto_quant = CryptoQuantService(
-            sources={"BTC": btc_quant_spot, "ETH": eth_quant_spot},
+    # Build the unified PriceSource dict consumed by the strike service AND
+    # the short-horizon orchestrator. One Coinbase ticker per asset per
+    # process; no double-polling.
+    quant_specs_short = [apply_env_overrides(s) for s in enabled_for(MarketFamily.SHORT_HORIZON)]
+    quant_specs_strike = [apply_env_overrides(s) for s in enabled_for(MarketFamily.STRIKE)]
+    asset_ids: set[str] = (
+        {s.asset_id for s in quant_specs_short} | {s.asset_id for s in quant_specs_strike}
+    )
+    quant_sources: dict[str, CoinbaseSpotSource] = {}
+    quant_settlements: dict[str, CoinbaseSpotSource] = {}
+    for asset_id in sorted(asset_ids):
+        # Both the price source and the settlement source come from the
+        # registry's per-asset factories so a future asset can swap to e.g.
+        # ChainlinkSpotSource without touching this file.
+        spec = next(
+            (s for s in quant_specs_strike + quant_specs_short if s.asset_id == asset_id),
+            None,
         )
-        # Prime the spot caches so the first scan after startup has data.
-        btc_quant_spot.tick()
-        eth_quant_spot.tick()
+        if spec is None:
+            continue
+        quant_sources[asset_id] = spec.price_source()
+        quant_settlements[asset_id] = spec.settlement_source()
+        # Prime the spot cache so the first scan after startup has data.
+        quant_sources[asset_id].tick()
+
+    crypto_quant: QuantStrikeService | None = None
+    if settings.quant_strike_enabled and quant_sources:
+        crypto_quant = QuantStrikeService(sources=quant_sources)
         logger.info(
-            "crypto_quant enabled (registry-driven; vols read from registry)",
+            "quant strike enabled: assets=%s",
+            sorted(quant_sources.keys()),
         )
 
     brain = BrainService(
@@ -379,27 +402,61 @@ def run() -> None:
     pool.spawn("executor", executor_worker, n_executor)
     pool.spawn("exit_monitor", exit_monitor_worker, n_exit)
 
-    if settings.btc5m_enabled:
+    # Single quant orchestrator owns all PriceSource ticks plus the
+    # short-horizon scan/decide/resolve loop. The strike service shares the
+    # same source dict, so there's no double-polling.
+    if quant_sources:
+        book_fetcher = PolymarketBookFetcher(polymarket)
+        quant_short_scanner = QuantShortScanner()
+        quant_decider = QuantDecider(
+            sources=quant_sources,
+            book=book_fetcher,
+            repo=quant_short_repo,
+            position_size_usd=Decimal(str(settings.quant_position_size_usd)),
+        )
+        quant_resolver = QuantResolver(
+            repo=quant_short_repo,
+            settlements=quant_settlements,
+        )
+
+        def quant_scan_and_decide() -> None:
+            if not settings.quant_short_enabled:
+                return
+            try:
+                for m in quant_short_scanner.scan():
+                    quant_short_repo.upsert_market(m)
+            except Exception:
+                logger.exception("quant scan failed")
+            try:
+                active = quant_short_repo.get_active_markets(datetime.now(timezone.utc))
+                for row in active:
+                    quant_decider.evaluate(row)
+            except Exception:
+                logger.exception("quant decider failed")
+            try:
+                quant_resolver.resolve_due_markets()
+            except Exception:
+                logger.exception("quant resolver failed")
+
         pool.spawn(
-            "btc5m",
-            lambda: run_btc5m_worker(settings, btc5m_repo, polymarket, queues.shutdown),
+            "quant_orchestrator",
+            lambda: run_quant_orchestrator(
+                sources=quant_sources,
+                specs=quant_specs_short + quant_specs_strike,
+                scan_and_decide=quant_scan_and_decide,
+                market_interval_s=settings.quant_market_poll_s,
+                shutdown_q=queues.shutdown,
+            ),
             1,
         )
-        logger.info("btc5m: 1 worker enabled")
+        logger.info(
+            "quant_orchestrator: 1 worker enabled (short=%s strike=%s assets=%s)",
+            settings.quant_short_enabled,
+            settings.quant_strike_enabled,
+            sorted(quant_sources.keys()),
+        )
     else:
-        logger.info("btc5m: disabled (set BTC5M_ENABLED=true to enable)")
-
-    if crypto_quant is not None and btc_quant_spot is not None and eth_quant_spot is not None:
-        def crypto_quant_spot_worker():
-            """Refresh BTC and ETH spot caches every CRYPTO_QUANT_SPOT_POLL_S seconds."""
-            interval = settings.crypto_quant_spot_poll_s
-            while queues.shutdown.empty():
-                btc_quant_spot.tick()
-                eth_quant_spot.tick()
-                time.sleep(interval)
-
-        pool.spawn("crypto_quant_spot", crypto_quant_spot_worker, 1)
-        logger.info("crypto_quant_spot: 1 worker enabled")
+        logger.info("quant: disabled (no assets enabled in registry)")
 
     logger.info(
         "All workers started: %d scanner, %d brain, %d executor, %d exit",
