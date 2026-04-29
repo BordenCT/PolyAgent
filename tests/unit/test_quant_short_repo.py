@@ -1,18 +1,18 @@
-"""Tests for Btc5mRepository."""
+"""Tests for QuantShortRepository."""
 from __future__ import annotations
 from datetime import datetime, timezone
 from decimal import Decimal
 from unittest.mock import MagicMock
 from uuid import uuid4
 
-from polyagent.data.repositories.btc5m import Btc5mRepository
-from polyagent.models import Btc5mMarket, Btc5mTrade
+from polyagent.models import QuantShortMarket, QuantShortTrade
+from polyagent.services.quant.short_horizon.repository import QuantShortRepository
 
 
-class TestBtc5mRepository:
+class TestQuantShortRepository:
     def setup_method(self):
         self.db = MagicMock()
-        self.repo = Btc5mRepository(self.db)
+        self.repo = QuantShortRepository(self.db)
 
     def _mock_cursor(self, fetchone=None, fetchall=None):
         cur = MagicMock()
@@ -28,7 +28,7 @@ class TestBtc5mRepository:
     def test_upsert_market_returns_id(self):
         expected = uuid4()
         self._mock_cursor(fetchone={"id": expected})
-        market = Btc5mMarket(
+        market = QuantShortMarket(
             polymarket_id="0x1",
             slug="btc-updown-5m-1776995400",
             token_id_yes="y",
@@ -43,7 +43,7 @@ class TestBtc5mRepository:
     def test_insert_trade_returns_id(self):
         expected = uuid4()
         self._mock_cursor(fetchone={"id": expected})
-        trade = Btc5mTrade(
+        trade = QuantShortTrade(
             market_id=uuid4(),
             side="YES",
             fill_price_assumed=Decimal("0.52"),
@@ -62,7 +62,8 @@ class TestBtc5mRepository:
             {"id": uuid4(), "polymarket_id": "0x1", "slug": "s", "token_id_yes": "y",
              "token_id_no": "n", "window_duration_s": 300,
              "window_start_ts": now, "window_end_ts": now,
-             "start_spot": None, "end_spot": None, "outcome": None}
+             "start_spot": None, "end_spot": None, "outcome": None,
+             "asset_id": "BTC", "price_source_id": None}
         ])
         rows = self.repo.get_unresolved_markets_past_end(now)
         assert len(rows) == 1
