@@ -74,6 +74,7 @@ class TestBtc5mRepository:
             start_spot=Decimal("65000"),
             end_spot=Decimal("65100"),
             outcome="YES",
+            price_source_id="coinbase:BTC-USD",
         )
 
     def test_update_trade_pnl(self):

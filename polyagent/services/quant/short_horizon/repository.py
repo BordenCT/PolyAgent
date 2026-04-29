@@ -57,7 +57,8 @@ UPDATE_MARKET_RESOLUTION = """
     SET start_spot = %(start_spot)s,
         end_spot = %(end_spot)s,
         outcome = %(outcome)s,
-        resolved_at = NOW()
+        resolved_at = NOW(),
+        price_source_id = %(price_source_id)s
     WHERE id = %(id)s
 """
 
@@ -149,17 +150,30 @@ class QuantShortRepository:
     def update_market_resolution(
         self,
         market_id: UUID,
+        *,
         start_spot: Decimal,
         end_spot: Decimal,
         outcome: str,
+        price_source_id: str,
     ) -> None:
-        """Stamp a market with its resolution data and set resolved_at."""
+        """Stamp a market with its resolution data and set resolved_at.
+
+        Args:
+            market_id: UUID of the row in ``quant_short_markets``.
+            start_spot: Spot at ``window_start_ts``.
+            end_spot: Spot at ``window_end_ts``.
+            outcome: ``YES`` or ``NO``.
+            price_source_id: Audit identifier for the settlement source
+                (e.g. ``coinbase:BTC-USD``) so resolved markets are
+                traceable to a single price feed.
+        """
         with self._db.cursor() as cur:
             cur.execute(UPDATE_MARKET_RESOLUTION, {
                 "id": market_id,
                 "start_spot": start_spot,
                 "end_spot": end_spot,
                 "outcome": outcome,
+                "price_source_id": price_source_id,
             })
 
     def get_trades_for_market(self, market_id: UUID) -> list[dict]:
