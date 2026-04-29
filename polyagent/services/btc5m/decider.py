@@ -9,6 +9,11 @@ from polyagent.data.repositories.btc5m import Btc5mRepository
 from polyagent.models import Btc5mTrade
 from polyagent.services.btc5m.estimator import estimate_up_probability
 from polyagent.services.btc5m.spot import BtcSpotSource
+from polyagent.services.quant.core.vol import (
+    VolCalibration,
+    VolMethod,
+    compute_vol,
+)
 
 logger = logging.getLogger("polyagent.services.btc5m.decider")
 
@@ -89,13 +94,23 @@ class Btc5mDecider:
         if spot is None:
             return
 
-        vol = self._spot.realized_vol(window_s=self._vol_window_s)
-
         window_end = market_row["window_end_ts"]
         now = datetime.now(timezone.utc)
         ttm = (window_end - now).total_seconds()
         if ttm <= 0:
             return  # resolver will handle
+
+        # Behavior-preserving: lookback always exactly self._vol_window_s.
+        vol_spec = type("_Inline", (), {
+            "default_vol": 0.0,
+            "vol_calibration": VolCalibration(
+                method=VolMethod.ROLLING_REALIZED,
+                rolling_min_s=self._vol_window_s,
+                rolling_max_s=self._vol_window_s,
+                rolling_horizon_multiplier=1.0,
+            ),
+        })
+        vol = compute_vol(vol_spec, self._spot, horizon_s=ttm)
 
         # Before the window opens, start_spot is unknown — proxy with the
         # current spot so the estimator treats it as an ATM position.
