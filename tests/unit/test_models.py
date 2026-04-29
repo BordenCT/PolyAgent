@@ -97,12 +97,12 @@ class TestMarketClass:
         assert m.market_class == MarketClass.CRYPTO
 
 
-from polyagent.models import Btc5mMarket, Btc5mTrade
+from polyagent.models import QuantShortMarket, QuantShortTrade
 
 
-class TestBtc5mMarket:
+class TestQuantShortMarket:
     def test_open_market_has_no_outcome(self):
-        m = Btc5mMarket(
+        m = QuantShortMarket(
             polymarket_id="0xabc",
             slug="btc-updown-5m-1776995400",
             token_id_yes="y",
@@ -110,14 +110,16 @@ class TestBtc5mMarket:
             window_duration_s=300,
             window_start_ts=datetime(2026, 4, 24, 1, 45, tzinfo=timezone.utc),
             window_end_ts=datetime(2026, 4, 24, 1, 50, tzinfo=timezone.utc),
+            asset_id="BTC",
         )
         assert m.outcome is None
         assert m.start_spot is None
         assert m.end_spot is None
         assert m.window_duration_s == 300
+        assert m.asset_id == "BTC"
 
     def test_resolved_15m_market_has_outcome_and_spots(self):
-        m = Btc5mMarket(
+        m = QuantShortMarket(
             polymarket_id="0xabc",
             slug="btc-updown-15m-1776995400",
             token_id_yes="y",
@@ -125,6 +127,7 @@ class TestBtc5mMarket:
             window_duration_s=900,
             window_start_ts=datetime(2026, 4, 24, 1, 35, tzinfo=timezone.utc),
             window_end_ts=datetime(2026, 4, 24, 1, 50, tzinfo=timezone.utc),
+            asset_id="BTC",
             start_spot=Decimal("65000"),
             end_spot=Decimal("65100"),
             outcome="YES",
@@ -133,9 +136,9 @@ class TestBtc5mMarket:
         assert m.window_duration_s == 900
 
 
-class TestBtc5mTrade:
+class TestQuantShortTrade:
     def test_create_unresolved_trade(self):
-        t = Btc5mTrade(
+        t = QuantShortTrade(
             market_id=uuid4(),
             side="YES",
             fill_price_assumed=Decimal("0.52"),

@@ -383,6 +383,3 @@ class QuantShortTrade:
     pnl: Decimal | None = None
 
 
-# Back-compat aliases used by the btc5m worker; deleted in PR 6.
-Btc5mMarket = QuantShortMarket
-Btc5mTrade = QuantShortTrade
