@@ -7,6 +7,7 @@ from decimal import Decimal
 from typing import Protocol
 
 from polyagent.data.repositories.btc5m import Btc5mRepository
+from polyagent.services.quant.core.pnl import compute_pnl
 
 logger = logging.getLogger("polyagent.services.btc5m.resolver")
 
@@ -15,32 +16,6 @@ class SpotHistory(Protocol):
     """Anything that can answer 'what was the BTC spot at timestamp T?'."""
 
     def price_at(self, ts: datetime) -> Decimal | None: ...
-
-
-def compute_pnl(
-    side: str,
-    fill_price: Decimal,
-    outcome: str,
-    size: Decimal,
-) -> Decimal:
-    """Realized P&L for a binary paper trade.
-
-    We assume trade fills with `size` USD notional at `fill_price`. YES side
-    profits `(1 - fill_price)` per unit notional if outcome is YES, loses
-    `fill_price` if NO. NO side mirrors.
-
-    Args:
-        side: "YES" or "NO" — which side of the market was bought.
-        fill_price: Assumed fill price in [0, 1].
-        outcome: "YES" or "NO" — the resolved market outcome.
-        size: USD notional size of the trade.
-
-    Returns:
-        Signed P&L in USD.
-    """
-    if side == "YES":
-        return size * (Decimal("1") - fill_price) if outcome == "YES" else -size * fill_price
-    return size * (Decimal("1") - fill_price) if outcome == "NO" else -size * fill_price
 
 
 class Btc5mResolver:
