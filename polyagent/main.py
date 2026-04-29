@@ -27,7 +27,7 @@ from polyagent.models import MarketStatus
 from polyagent.services.brain import BrainService
 from polyagent.services.btc5m.spot import CoinbaseSpotSource
 from polyagent.services.classifier import classify
-from polyagent.services.crypto_quant import CryptoQuantService
+from polyagent.services.quant.strike import QuantStrikeService as CryptoQuantService
 from polyagent.services.embeddings import EmbeddingsService
 from polyagent.services.executor import ExecutorService
 from polyagent.services.btc5m.worker import run_btc5m_worker
@@ -109,17 +109,13 @@ def run() -> None:
         btc_quant_spot = CoinbaseSpotSource(product="BTC-USD")
         eth_quant_spot = CoinbaseSpotSource(product="ETH-USD")
         crypto_quant = CryptoQuantService(
-            btc_spot=btc_quant_spot,
-            eth_spot=eth_quant_spot,
-            btc_vol=settings.crypto_quant_btc_vol,
-            eth_vol=settings.crypto_quant_eth_vol,
+            sources={"BTC": btc_quant_spot, "ETH": eth_quant_spot},
         )
         # Prime the spot caches so the first scan after startup has data.
         btc_quant_spot.tick()
         eth_quant_spot.tick()
         logger.info(
-            "crypto_quant enabled (btc_vol=%.2f eth_vol=%.2f)",
-            settings.crypto_quant_btc_vol, settings.crypto_quant_eth_vol,
+            "crypto_quant enabled (registry-driven; vols read from registry)",
         )
 
     brain = BrainService(

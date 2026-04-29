@@ -138,11 +138,12 @@ class TestBrainCryptoQuantRouting:
         )
 
     def test_crypto_strike_routes_to_quant_and_skips_llm(self):
-        from polyagent.services.crypto_quant.estimator import QuantResult
-        from polyagent.services.crypto_quant.parser import CryptoStrike, StrikeKind
+        from polyagent.services.quant.strike import (
+            ParsedStrike, QuantResult, StrikeKind,
+        )
 
         question = "Will the price of Bitcoin be above $80,000 on April 26?"
-        strike = CryptoStrike(asset="BTC", kind=StrikeKind.UP, strike=Decimal("80000"))
+        strike = ParsedStrike(asset_id="BTC", kind=StrikeKind.UP, strike=Decimal("80000"))
         self.crypto_quant.matches.return_value = strike
         self.crypto_quant.evaluate.return_value = (
             strike,
@@ -161,11 +162,12 @@ class TestBrainCryptoQuantRouting:
         self.claude.evaluate_market.assert_not_called()
 
     def test_crypto_strike_with_thin_edge_is_rejected_without_llm_fallback(self):
-        from polyagent.services.crypto_quant.estimator import QuantResult
-        from polyagent.services.crypto_quant.parser import CryptoStrike, StrikeKind
+        from polyagent.services.quant.strike import (
+            ParsedStrike, QuantResult, StrikeKind,
+        )
 
         question = "Will the price of Bitcoin be above $80,000 on April 26?"
-        strike = CryptoStrike(asset="BTC", kind=StrikeKind.UP, strike=Decimal("80000"))
+        strike = ParsedStrike(asset_id="BTC", kind=StrikeKind.UP, strike=Decimal("80000"))
         self.crypto_quant.matches.return_value = strike
         self.crypto_quant.evaluate.return_value = (
             strike,

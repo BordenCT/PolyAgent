@@ -1,14 +1,19 @@
-"""Parser tests for crypto-strike questions."""
+"""Parser tests for crypto-strike questions (legacy regression suite).
+
+The new canonical tests live at tests/unit/test_quant_strike_parser.py.
+This file keeps additional edge cases (decimal handling, case insensitivity,
+btc alias, barrier-touch deferral) using the new ParsedStrike API.
+"""
 from decimal import Decimal
 
-from polyagent.services.crypto_quant.parser import StrikeKind, parse_question
+from polyagent.services.quant.strike.parser import StrikeKind, parse_question
 
 
 class TestParseQuestion:
     def test_above_btc(self):
         s = parse_question("Will the price of Bitcoin be above $80,000 on April 26?")
         assert s is not None
-        assert s.asset == "BTC"
+        assert s.asset_id == "BTC"
         assert s.kind == StrikeKind.UP
         assert s.strike == Decimal("80000")
         assert s.upper_strike is None
@@ -16,7 +21,7 @@ class TestParseQuestion:
     def test_above_eth_with_decimal(self):
         s = parse_question("Will the price of Ethereum be above $2,400.50 on April 26?")
         assert s is not None
-        assert s.asset == "ETH"
+        assert s.asset_id == "ETH"
         assert s.kind == StrikeKind.UP
         assert s.strike == Decimal("2400.50")
 
@@ -44,12 +49,12 @@ class TestParseQuestion:
     def test_btc_alias(self):
         s = parse_question("Will the price of BTC be above $80,000 on April 26?")
         assert s is not None
-        assert s.asset == "BTC"
+        assert s.asset_id == "BTC"
 
     def test_case_insensitive(self):
         s = parse_question("WILL THE PRICE OF BITCOIN BE ABOVE $80,000 ON APRIL 26?")
         assert s is not None
-        assert s.asset == "BTC"
+        assert s.asset_id == "BTC"
 
     def test_non_matching_returns_none(self):
         assert parse_question("Will Norrie win the Madrid Open?") is None

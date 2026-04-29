@@ -11,7 +11,7 @@ from typing import Protocol
 from uuid import UUID
 
 from polyagent.models import Consensus, MarketData, Thesis, ThesisChecks
-from polyagent.services.crypto_quant import CryptoQuantService
+from polyagent.services.quant.strike import QuantStrikeService as CryptoQuantService
 from polyagent.services.embeddings import EmbeddingsService
 
 logger = logging.getLogger("polyagent.services.brain")
