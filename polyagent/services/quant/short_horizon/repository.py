@@ -83,6 +83,12 @@ COUNT_OPEN_TRADES_FOR_ASSET = """
     WHERE t.pnl IS NULL AND m.asset_id = %(asset_id)s
 """
 
+SET_START_SPOT = """
+    UPDATE quant_short_markets
+    SET start_spot = %(start_spot)s
+    WHERE id = %(id)s AND start_spot IS NULL
+"""
+
 
 class QuantShortRepository:
     """CRUD operations for quant_short_markets and quant_short_trades.
@@ -200,3 +206,8 @@ class QuantShortRepository:
             cur.execute(COUNT_OPEN_TRADES_FOR_ASSET, {"asset_id": asset_id})
             row = cur.fetchone()
         return int(row["open_count"]) if row else 0
+
+    def set_start_spot(self, market_id: UUID, start_spot: Decimal) -> None:
+        """Write start_spot on first evaluation; no-op if already set."""
+        with self._db.cursor() as cur:
+            cur.execute(SET_START_SPOT, {"id": market_id, "start_spot": start_spot})

@@ -31,10 +31,17 @@ class BookFetcher(Protocol):
     def fetch_mid(self, token_id: str) -> tuple[Decimal, Decimal] | None: ...
 
 
+class _SettlementSource(Protocol):
+    """Fetches historical spot price at a given timestamp."""
+
+    def price_at(self, ts: datetime) -> Decimal | None: ...
+
+
 class _RepoLike(Protocol):
     def get_trades_for_market(self, market_id: str) -> list[dict]: ...
     def insert_trade(self, trade) -> None: ...
     def count_open_trades_for_asset(self, asset_id: str) -> int: ...
+    def set_start_spot(self, market_id: str, start_spot: Decimal) -> None: ...
 
 
 class QuantDecider:
@@ -65,6 +72,7 @@ class QuantDecider:
         position_size_usd: Decimal,
         max_trades_per_cycle: int = 5,
         max_open_per_asset: int = 3,
+        settlements: dict[str, _SettlementSource] | None = None,
     ) -> None:
         self._sources = sources
         self._book = book
@@ -73,6 +81,7 @@ class QuantDecider:
         self._max_per_cycle = max_trades_per_cycle
         self._max_open_per_asset = max_open_per_asset
         self._opened_this_cycle = 0
+        self._settlements: dict[str, _SettlementSource] = settlements or {}
 
     def reset_cycle(self) -> None:
         """Reset the per-cycle trade counter. Call at the start of each scan."""
@@ -122,7 +131,16 @@ class QuantDecider:
         if ttm <= 0:
             return
 
-        start_spot = market_row.get("start_spot") or spot
+        start_spot_raw = market_row.get("start_spot")
+        if start_spot_raw is None:
+            settlement = self._settlements.get(asset_id)
+            if settlement is not None:
+                fetched = settlement.price_at(market_row["window_start_ts"])
+                if fetched is not None:
+                    self._repo.set_start_spot(market_id, fetched)
+                    start_spot_raw = fetched
+        start_spot = Decimal(str(start_spot_raw)) if start_spot_raw is not None else spot
+
         vol = compute_vol(spec, source, horizon_s=ttm)
         p_up = estimate_up_probability(start_spot, spot, ttm, vol)
 
