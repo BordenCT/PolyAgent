@@ -36,7 +36,12 @@ ASSETS: dict[str, AssetSpec] = {
         supported_market_families=frozenset({
             MarketFamily.SHORT_HORIZON, MarketFamily.STRIKE, MarketFamily.RANGE,
         }),
-        paper_only=False,
+        # paper_only=True until we wire a Chainlink price source. Polymarket
+        # short-horizon BTC up/down markets settle on the Chainlink BTC/USD
+        # data stream, not Coinbase. Trading live with a Coinbase-priced
+        # estimator against Chainlink-resolved markets eats edge to basis.
+        # See docs/feat/btc-5m-roadmap.md Phase 3 for the swap.
+        paper_only=True,
         fee_bps=0.0,
         edge_threshold=0.05,
         tick_interval_s=2.0,

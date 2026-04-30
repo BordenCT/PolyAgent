@@ -103,7 +103,16 @@ class QuantShortScanner:
         try:
             resp = self._http.get(
                 _GAMMA_MARKETS_URL,
-                params={"active": "true", "closed": "false", "limit": self._page_limit},
+                params={
+                    "active": "true",
+                    "closed": "false",
+                    "limit": self._page_limit,
+                    # Newest-first so the rapidly-rotating 5m/15m markets land at
+                    # the top of the response and aren't pushed out of the
+                    # page_limit window by older long-horizon markets.
+                    "order": "startDate",
+                    "ascending": "false",
+                },
             )
             if resp.status_code != 200:
                 logger.warning("gamma returned %s", resp.status_code)

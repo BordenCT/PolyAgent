@@ -87,3 +87,12 @@ def test_scanner_handles_bad_token_ids_gracefully():
     }]
     s = QuantShortScanner(http_client=_FakeHttp(body))
     assert s.scan() == []
+
+
+def test_scanner_requests_newest_first():
+    """Regression: gamma's default ordering pushes rapidly-rotating 5m
+    markets out of the page_limit window. We must request startDate desc."""
+    http = _FakeHttp([])
+    QuantShortScanner(http_client=http).scan()
+    assert http.last_params["order"] == "startDate"
+    assert http.last_params["ascending"] == "false"
