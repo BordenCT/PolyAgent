@@ -169,3 +169,57 @@ class TestFetchMarketState:
         assert state is not None
         assert state["is_resolved"] is True
         assert state["midpoint_price"] == Decimal("0")
+
+
+class TestFetchOrderBook:
+    def setup_method(self):
+        self.client = PolymarketClient(base_url="https://clob.polymarket.com")
+
+    def _resp(self, payload, status=200):
+        r = MagicMock()
+        r.status_code = status
+        r.json.return_value = payload
+        return r
+
+    def test_returns_book_with_normalized_ordering(self):
+        # Polymarket may return levels in arbitrary order; we expect the
+        # client to sort bids descending and asks ascending so index 0 is best.
+        raw = {
+            "market": "0xmkt",
+            "asset_id": "tok_yes",
+            "bids": [
+                {"price": "0.40", "size": "100"},
+                {"price": "0.42", "size": "50"},   # best bid
+                {"price": "0.41", "size": "75"},
+            ],
+            "asks": [
+                {"price": "0.46", "size": "30"},
+                {"price": "0.44", "size": "80"},   # best ask
+                {"price": "0.45", "size": "60"},
+            ],
+        }
+        self.client._http.get = MagicMock(return_value=self._resp(raw))
+        book = self.client.fetch_order_book("tok_yes")
+        assert book["bids"][0]["price"] == "0.42"
+        assert book["asks"][0]["price"] == "0.44"
+
+    def test_returns_empty_dict_on_http_error(self):
+        self.client._http.get = MagicMock(return_value=self._resp({}, status=500))
+        assert self.client.fetch_order_book("tok_yes") == {}
+
+    def test_returns_empty_dict_on_exception(self):
+        self.client._http.get = MagicMock(side_effect=RuntimeError("boom"))
+        assert self.client.fetch_order_book("tok_yes") == {}
+
+    def test_returns_empty_dict_on_malformed_levels(self):
+        # A level missing the "price" key should not crash; book is rejected.
+        raw = {"bids": [{"size": "10"}], "asks": [{"price": "0.5", "size": "10"}]}
+        self.client._http.get = MagicMock(return_value=self._resp(raw))
+        assert self.client.fetch_order_book("tok_yes") == {}
+
+    def test_handles_empty_book_gracefully(self):
+        raw = {"market": "0xmkt", "bids": [], "asks": []}
+        self.client._http.get = MagicMock(return_value=self._resp(raw))
+        book = self.client.fetch_order_book("tok_yes")
+        assert book["bids"] == []
+        assert book["asks"] == []

@@ -112,26 +112,50 @@ class PolymarketClient:
         )
 
     def fetch_order_book(self, token_id: str) -> dict:
-        """Fetch order book for a specific token via CLI subprocess.
+        """Fetch order book for a specific token via the CLOB HTTP endpoint.
+
+        Returns the raw JSON shape from `/book?token_id=...` plus normalized
+        `bids` / `asks` lists sorted so index 0 is the best price (highest bid,
+        lowest ask). Polymarket's CLOB returns levels in arbitrary order, so
+        callers must not assume input order; we sort defensively.
 
         Args:
-            token_id: The outcome token ID to fetch the book for.
+            token_id: The outcome token ID (numeric string) to fetch.
 
         Returns:
             Parsed order book dict, or empty dict on failure.
         """
         try:
-            result = subprocess.run(
-                ["polymarket", "clob", "book", token_id, "-o", "json"],
-                capture_output=True,
-                text=True,
-                timeout=15,
+            resp = self._http.get("/book", params={"token_id": token_id})
+            if resp.status_code != 200:
+                logger.warning(
+                    "order book HTTP %s for token_id=%s", resp.status_code, token_id,
+                )
+                return {}
+            book = resp.json()
+        except Exception as exc:
+            logger.warning("order book fetch failed for %s: %s", token_id, exc)
+            return {}
+
+        # Normalize ordering: bids descending by price (best bid first),
+        # asks ascending by price (best ask first). Polymarket may return
+        # either order; callers downstream rely on index 0 being the best.
+        try:
+            bids = sorted(
+                book.get("bids") or [],
+                key=lambda lvl: Decimal(str(lvl["price"])),
+                reverse=True,
             )
-            if result.returncode == 0:
-                return json.loads(result.stdout)
-        except (subprocess.TimeoutExpired, FileNotFoundError, json.JSONDecodeError) as e:
-            logger.warning("CLI order book fetch failed for %s: %s", token_id, e)
-        return {}
+            asks = sorted(
+                book.get("asks") or [],
+                key=lambda lvl: Decimal(str(lvl["price"])),
+            )
+            book["bids"] = bids
+            book["asks"] = asks
+        except (KeyError, TypeError, ValueError) as exc:
+            logger.warning("malformed order book for %s: %s", token_id, exc)
+            return {}
+        return book
 
     def fetch_market_state(self, condition_id: str) -> dict | None:
         """Fetch a fresh price + volume + resolution snapshot for one market.
