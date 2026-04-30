@@ -34,6 +34,7 @@ class BookFetcher(Protocol):
 class _RepoLike(Protocol):
     def get_trades_for_market(self, market_id: str) -> list[dict]: ...
     def insert_trade(self, trade) -> None: ...
+    def count_open_trades_for_asset(self, asset_id: str) -> int: ...
 
 
 class QuantDecider:
@@ -42,9 +43,18 @@ class QuantDecider:
     Args:
         sources: Mapping from ``asset_id`` to its live :class:`PriceSource`.
         book: Order-book fetcher returning ``(best_bid, best_ask)``.
-        repo: Repository providing ``get_trades_for_market`` and
-            ``insert_trade``.
+        repo: Repository providing ``get_trades_for_market``, ``insert_trade``,
+            and ``count_open_trades_for_asset``.
         position_size_usd: Notional USD per paper trade.
+        max_trades_per_cycle: Hard cap on trades opened in a single
+            scan-and-decide pass. Prevents the cascade where one Coinbase
+            tick triggers identical signals on every active market in the
+            same instant. Reset via ``reset_cycle()`` between scans.
+        max_open_per_asset: Hard cap on simultaneously-open paper trades
+            per ``asset_id``. All short-horizon trades on the same asset
+            in the same orchestrator pass are 100%% correlated (same
+            spot, same vol, same model output), so the cap also bounds
+            correlated paper-bankroll exposure.
     """
 
     def __init__(
@@ -53,24 +63,38 @@ class QuantDecider:
         book: BookFetcher,
         repo: _RepoLike,
         position_size_usd: Decimal,
+        max_trades_per_cycle: int = 5,
+        max_open_per_asset: int = 3,
     ) -> None:
         self._sources = sources
         self._book = book
         self._repo = repo
         self._size = position_size_usd
+        self._max_per_cycle = max_trades_per_cycle
+        self._max_open_per_asset = max_open_per_asset
+        self._opened_this_cycle = 0
+
+    def reset_cycle(self) -> None:
+        """Reset the per-cycle trade counter. Call at the start of each scan."""
+        self._opened_this_cycle = 0
 
     def evaluate(self, market_row: dict) -> None:
         """Evaluate one market row and persist a paper trade if it clears gates.
 
         Skip conditions, in order:
+        - per-cycle trade cap reached,
         - market already has a trade,
         - no spec registered for ``asset_id``,
+        - per-asset open-position cap reached,
         - no live price source for ``asset_id`` or no current spot,
         - window already closed,
         - no book mid available,
         - absolute edge below ``spec.edge_threshold``,
         - gross edge does not exceed assumed fees.
         """
+        if self._opened_this_cycle >= self._max_per_cycle:
+            return
+
         market_id = market_row["id"]
         if self._repo.get_trades_for_market(market_id):
             return
@@ -81,6 +105,9 @@ class QuantDecider:
             logger.warning("no spec for asset_id=%s, skipping market %s", asset_id, market_id)
             return
         spec = apply_env_overrides(base_spec)
+
+        if self._repo.count_open_trades_for_asset(asset_id) >= self._max_open_per_asset:
+            return
 
         source = self._sources.get(asset_id)
         if source is None:
@@ -131,6 +158,7 @@ class QuantDecider:
             edge_at_decision=edge,
         )
         self._repo.insert_trade(trade)
+        self._opened_this_cycle += 1
         logger.info(
             "PAPER %s on %s: side=%s edge=%+.3f p_up=%.3f mid=%.3f",
             asset_id, market_row["polymarket_id"], side, edge, p_up, mid,

@@ -17,6 +17,12 @@ DEFAULT_QUESTION_BLOCKLIST: tuple[str, ...] = (
     # Barrier-touch markets ("dip to", "reach") need running-min/max math
     # we haven't shipped yet. Kill until that's built.
     r"^Will (Bitcoin|Ethereum|Solana) (reach|dip to|hit)",
+    # Verbose-slug daily up/down markets (e.g. "Bitcoin Up or Down on April 30",
+    # "S&P 500 (SPX) Up or Down on April 30", "WTI Crude Oil (WTI) Opens Up or
+    # Down on April 30"). These are directional binary bets where the LLM has
+    # no information edge. Phase 2 work will route the BTC/ETH variants to
+    # QuantStrikeService with a snapshotted opening spot. For now: block.
+    r"\b(Up or Down|Opens Up or Down)\b on ",
 )
 
 

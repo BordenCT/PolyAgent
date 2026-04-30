@@ -91,6 +91,8 @@ class Settings:
     quant_short_enabled: bool
     quant_market_poll_s: int
     quant_position_size_usd: float
+    quant_max_trades_per_cycle: int
+    quant_max_open_per_asset: int
 
     # Live order placement — belt-and-suspenders safety gate on top of paper_trade
     polymarket_live_enabled: bool
@@ -151,5 +153,7 @@ class Settings:
             quant_short_enabled=_env_bool("QUANT_SHORT_ENABLED", False),
             quant_market_poll_s=_env_int("QUANT_MARKET_POLL_S", 60),
             quant_position_size_usd=_env_float("QUANT_POSITION_SIZE_USD", 5.0),
+            quant_max_trades_per_cycle=_env_int("QUANT_MAX_TRADES_PER_CYCLE", 5),
+            quant_max_open_per_asset=_env_int("QUANT_MAX_OPEN_PER_ASSET", 3),
             polymarket_live_enabled=_env_bool("POLYMARKET_LIVE_ENABLED", False),
         )

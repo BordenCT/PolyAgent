@@ -8,15 +8,23 @@ from polyagent.services.quant.short_horizon.decider import QuantDecider
 
 
 class _FakeRepo:
-    def __init__(self):
+    def __init__(self, open_per_asset: dict[str, int] | None = None):
         self.trades_for: dict[str, list] = {}
         self.inserted: list = []
+        self.open_per_asset = open_per_asset or {}
 
     def get_trades_for_market(self, market_id):
         return self.trades_for.get(market_id, [])
 
     def insert_trade(self, t):
         self.inserted.append(t)
+        # Mirror DB-side accounting so per-asset cap works across calls.
+        # Trades are unresolved at insertion time; map by inferred asset.
+        # We can't read asset_id off the trade, so callers update
+        # self.open_per_asset directly when needed.
+
+    def count_open_trades_for_asset(self, asset_id: str) -> int:
+        return self.open_per_asset.get(asset_id, 0)
 
 
 class _FakeBook:
@@ -123,3 +131,79 @@ def test_decider_skips_when_edge_below_threshold():
     d = QuantDecider(sources=sources, book=book, repo=repo, position_size_usd=Decimal("5"))
     d.evaluate(_row())
     assert repo.inserted == []
+
+
+def test_decider_caps_trades_per_cycle():
+    """Per-cycle cap stops the cascade where one Coinbase tick triggers
+    correlated trades on every active market in the same orchestrator pass."""
+    repo = _FakeRepo()
+    sources = {"BTC": _FakeSrc(Decimal("60000"))}
+    book = _FakeBook((Decimal("0.30"), Decimal("0.32")))  # +0.19 edge, fires
+    d = QuantDecider(
+        sources=sources, book=book, repo=repo,
+        position_size_usd=Decimal("5"),
+        max_trades_per_cycle=2,
+        max_open_per_asset=99,  # disable the per-asset cap for this test
+    )
+    for i in range(10):
+        row = _row()
+        row["id"] = f"m{i}"
+        row["polymarket_id"] = f"0x{i:040x}"
+        d.evaluate(row)
+    assert len(repo.inserted) == 2
+
+
+def test_reset_cycle_clears_per_cycle_counter():
+    repo = _FakeRepo()
+    sources = {"BTC": _FakeSrc(Decimal("60000"))}
+    book = _FakeBook((Decimal("0.30"), Decimal("0.32")))
+    d = QuantDecider(
+        sources=sources, book=book, repo=repo,
+        position_size_usd=Decimal("5"),
+        max_trades_per_cycle=2,
+        max_open_per_asset=99,
+    )
+    for i in range(3):
+        row = _row()
+        row["id"] = f"a{i}"
+        row["polymarket_id"] = f"0x{i:040x}"
+        d.evaluate(row)
+    assert len(repo.inserted) == 2
+
+    d.reset_cycle()
+    for i in range(3):
+        row = _row()
+        row["id"] = f"b{i}"
+        row["polymarket_id"] = f"0x{(i + 100):040x}"
+        d.evaluate(row)
+    assert len(repo.inserted) == 4   # 2 from cycle 1 + 2 from cycle 2
+
+
+def test_decider_caps_open_trades_per_asset():
+    """When max_open_per_asset already-open trades exist for an asset,
+    the decider refuses to open more even if edge clears the threshold."""
+    repo = _FakeRepo(open_per_asset={"BTC": 3})
+    sources = {"BTC": _FakeSrc(Decimal("60000"))}
+    book = _FakeBook((Decimal("0.30"), Decimal("0.32")))
+    d = QuantDecider(
+        sources=sources, book=book, repo=repo,
+        position_size_usd=Decimal("5"),
+        max_trades_per_cycle=99,
+        max_open_per_asset=3,
+    )
+    d.evaluate(_row())
+    assert repo.inserted == []
+
+
+def test_decider_allows_trade_when_open_under_per_asset_cap():
+    repo = _FakeRepo(open_per_asset={"BTC": 2})
+    sources = {"BTC": _FakeSrc(Decimal("60000"))}
+    book = _FakeBook((Decimal("0.30"), Decimal("0.32")))
+    d = QuantDecider(
+        sources=sources, book=book, repo=repo,
+        position_size_usd=Decimal("5"),
+        max_trades_per_cycle=99,
+        max_open_per_asset=3,
+    )
+    d.evaluate(_row())
+    assert len(repo.inserted) == 1

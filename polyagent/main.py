@@ -413,6 +413,8 @@ def run() -> None:
             book=book_fetcher,
             repo=quant_short_repo,
             position_size_usd=Decimal(str(settings.quant_position_size_usd)),
+            max_trades_per_cycle=settings.quant_max_trades_per_cycle,
+            max_open_per_asset=settings.quant_max_open_per_asset,
         )
         quant_resolver = QuantResolver(
             repo=quant_short_repo,
@@ -428,6 +430,7 @@ def run() -> None:
             except Exception:
                 logger.exception("quant scan failed")
             try:
+                quant_decider.reset_cycle()
                 active = quant_short_repo.get_active_markets(datetime.now(timezone.utc))
                 for row in active:
                     quant_decider.evaluate(row)

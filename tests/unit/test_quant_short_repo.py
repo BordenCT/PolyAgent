@@ -81,3 +81,9 @@ class TestQuantShortRepository:
     def test_update_trade_pnl(self):
         self._mock_cursor(fetchone=None)
         self.repo.update_trade_pnl(uuid4(), Decimal("0.50"))
+
+
+    def test_count_open_trades_for_asset(self):
+        self._mock_cursor(fetchone={"open_count": 3})
+        n = self.repo.count_open_trades_for_asset("BTC")
+        assert n == 3

@@ -76,6 +76,13 @@ UPDATE_TRADE_PNL = """
     WHERE id = %(id)s
 """
 
+COUNT_OPEN_TRADES_FOR_ASSET = """
+    SELECT COUNT(*) AS open_count
+    FROM quant_short_trades t
+    JOIN quant_short_markets m ON m.id = t.market_id
+    WHERE t.pnl IS NULL AND m.asset_id = %(asset_id)s
+"""
+
 
 class QuantShortRepository:
     """CRUD operations for quant_short_markets and quant_short_trades.
@@ -186,3 +193,10 @@ class QuantShortRepository:
         """Set the realized P&L on a trade and stamp resolved_at."""
         with self._db.cursor() as cur:
             cur.execute(UPDATE_TRADE_PNL, {"id": trade_id, "pnl": pnl})
+
+    def count_open_trades_for_asset(self, asset_id: str) -> int:
+        """Return the number of unresolved paper trades for a given asset."""
+        with self._db.cursor() as cur:
+            cur.execute(COUNT_OPEN_TRADES_FOR_ASSET, {"asset_id": asset_id})
+            row = cur.fetchone()
+        return int(row["open_count"]) if row else 0
