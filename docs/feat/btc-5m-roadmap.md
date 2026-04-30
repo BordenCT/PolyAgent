@@ -39,19 +39,45 @@ Breakeven on a 1¢ Polymarket spread is ~50.5%; the 52% threshold has a
 real-edge buffer. "Total P&L ≥ $5" deliberately is not "just positive"
 — tiny positive is probably noise.
 
-**Build:** flip paper → live. Ship a separate `BTC5M_LIVE_ENABLED` env
-var (independent of the main bot's `POLYMARKET_LIVE_ENABLED`).
-Replace the paper `insert_trade` call with order submission through the
-existing `PolymarketClient.place_order` path. Add three guards:
+**Build:** flip paper to live. Ship a separate `QUANT_SHORT_LIVE_ENABLED`
+env var (independent of the main bot's `POLYMARKET_LIVE_ENABLED`).
+Replace the paper `insert_trade` call in `QuantDecider` with order
+submission through the existing `PolymarketClient.place_order` path. Add
+three guards:
 
 - Hard bankroll cap on the sub-bot (separate from main bot bankroll,
-  $100–200 suggested to start).
-- Per-day loss kill switch (e.g. −$5 loss → disable for 24h).
-- Fixed $5 notional per trade until ≥ 50 realized trades exist, then
+  $100 to $200 suggested to start).
+- Per-day loss kill switch (e.g. -$5 loss disables for 24h).
+- Fixed $5 notional per trade until >= 50 realized trades exist, then
   switch to Kelly sizing fitted to realized edge statistics.
 
-**Effort:** ~1 day. All decision logic already exists; we're replacing
-a DB write with an order submission.
+**Also unify the trade ledger.** The short-horizon paper-trading work
+was deliberately kept on a separate `quant_short_trades` table so the
+14-day gate evaluation could be read cleanly without main-bot trades
+mixed in. That separation has served its purpose at gate-time and now
+becomes operational drift. As part of the live flip:
+
+- Write live short-horizon trades to the main `positions` table tagged
+  `market_class='quant_short'` (the column already exists from the
+  classifier feature).
+- Add a `quant_short_audit` sidecar table with `FK position_id` carrying
+  the math-specific columns (`estimator_p_up`, `vol_at_decision`,
+  `edge_at_decision`, `price_source_id`). Keeps `positions` narrow.
+- Refactor `polyagent quant-stats` to be a thin view over
+  `positions JOIN quant_short_audit` filtered by `market_class`.
+- Drop `quant_short_trades` in a follow-up migration once the audit
+  retention window passes.
+- Delete the "Quant Short-Horizon (paper)" section from
+  `polyagent/cli/performance.py` (the interim split-ledger surface,
+  shipped during Phase 1 paper-trading) since live trades will land in
+  the main `positions` rollup automatically.
+- The strike-market handler already writes through this pipeline today.
+  Phase 2 makes short-horizon consistent with strike.
+
+**Effort:** ~1 day for the live flip itself plus ~half day for the
+ledger unification. All decision logic already exists; we're replacing
+a `quant_short_trades` insert with a position write through
+`ExecutorService.place_order`.
 
 ## Phase 3 — Chainlink Data Streams swap
 

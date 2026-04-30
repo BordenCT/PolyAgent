@@ -74,4 +74,42 @@ def perf(daily: bool, by_strategy: bool, by_category: bool):
             day_table.add_row(str(d["day"]), str(d["trades"]), f"[{s}]${dpnl:+,.2f}[/{s}]")
         console.print(day_table)
 
+    # Short-horizon quant subsystem keeps a separate paper-trade ledger so
+    # the 14-day gate evaluation (see docs/feat/btc-5m-roadmap.md Phase 2)
+    # stays clean. Phase 2 unifies it into the positions table.
+    with db.cursor() as cur:
+        cur.execute("""
+            SELECT
+                COUNT(*) FILTER (WHERE pnl IS NOT NULL)              AS resolved,
+                COUNT(*) FILTER (WHERE pnl > 0)                      AS wins,
+                COUNT(*) FILTER (WHERE pnl <= 0)                     AS losses,
+                COALESCE(SUM(pnl), 0)                                AS total_pnl,
+                COALESCE(AVG(pnl) FILTER (WHERE pnl IS NOT NULL), 0) AS avg_pnl,
+                COALESCE(AVG(edge_at_decision) FILTER (WHERE pnl IS NOT NULL), 0) AS avg_edge
+            FROM quant_short_trades
+        """)
+        qs = cur.fetchone()
+
+    qs_table = Table(title="Quant Short-Horizon (paper, separate ledger)")
+    qs_table.add_column("Metric", style="cyan")
+    qs_table.add_column("Value")
+    qs_resolved = int(qs["resolved"] or 0)
+    if qs_resolved == 0:
+        qs_table.add_row("Resolved Trades", "0")
+        qs_table.add_row("Note", "no paper trades yet")
+    else:
+        qs_wins = int(qs["wins"])
+        qs_losses = int(qs["losses"])
+        qs_pnl = float(qs["total_pnl"])
+        qs_avg = float(qs["avg_pnl"])
+        qs_edge = float(qs["avg_edge"])
+        qs_win_pct = (qs_wins / qs_resolved * 100) if qs_resolved else 0
+        qs_style = "green" if qs_pnl >= 0 else "red"
+        qs_table.add_row("Resolved Trades", str(qs_resolved))
+        qs_table.add_row("Win/Loss", f"{qs_wins}/{qs_losses} ({qs_win_pct:.1f}%)")
+        qs_table.add_row("Total P&L", f"[{qs_style}]${qs_pnl:+,.2f}[/{qs_style}]")
+        qs_table.add_row("Avg P&L/Trade", f"${qs_avg:+,.2f}")
+        qs_table.add_row("Avg Edge", f"{qs_edge:+.3f}")
+    console.print(qs_table)
+
     db.close()

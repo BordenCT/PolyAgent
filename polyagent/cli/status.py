@@ -34,6 +34,17 @@ def status(watch: bool):
                 cur.execute("SELECT COUNT(*) as cnt FROM thesis WHERE created_at > NOW() - INTERVAL '24 hours'")
                 recent_theses = cur.fetchone()["cnt"]
 
+                # Short-horizon quant subsystem (separate ledger; unifies in Phase 2).
+                cur.execute("""
+                    SELECT
+                        COUNT(*) FILTER (WHERE pnl IS NOT NULL) AS resolved,
+                        COALESCE(SUM(pnl), 0)                   AS total_pnl
+                    FROM quant_short_trades
+                """)
+                qs_row = cur.fetchone()
+                qs_resolved = int(qs_row["resolved"] or 0)
+                qs_pnl = Decimal(str(qs_row["total_pnl"] or 0))
+
             position_repo = PositionRepository(db)
             open_capital, realized_pnl = position_repo.get_capital_state()
             starting = Decimal(str(settings.bankroll))
@@ -58,6 +69,10 @@ def status(watch: bool):
             table.add_row(
                 "Free Bankroll",
                 _free_bankroll_display(free_bankroll, settings.min_free_bankroll),
+            )
+            table.add_row(
+                "Quant Short (paper)",
+                f"{qs_resolved} resolved, {_colorize_pnl(qs_pnl)}",
             )
 
             console.clear()
