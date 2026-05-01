@@ -419,6 +419,7 @@ def run() -> None:
         )
         quant_resolver = QuantResolver(
             repo=quant_short_repo,
+            client=polymarket,
             settlements=quant_settlements,
         )
 
