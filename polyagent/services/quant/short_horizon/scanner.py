@@ -175,12 +175,25 @@ class QuantShortScanner:
             return []
         out: list[QuantShortMarket] = []
         pattern = _build_slug_regex()
+        now = datetime.now(timezone.utc)
+        # Polymarket lists 5m/15m markets up to 24+ hours in advance.
+        # Without a future-cutoff the page (sorted newest-startDate first
+        # to catch the rapidly-rotating short-horizon batch) is dominated
+        # by tomorrow's markets and currently-live ones are pushed off the
+        # 500-row page entirely. Lookahead is sized to the orchestrator's
+        # market-poll cadence so we discover markets just before they open.
+        lookahead = timedelta(seconds=60)
+        future_cutoff = now + lookahead
         for m in raw:
             slug = m.get("slug") or ""
             if not pattern.match(slug):
                 continue
             try:
                 asset_id, ws, we, dur = parse_short_horizon_slug(slug)
+                if ws > future_cutoff:
+                    continue  # window not opening soon
+                if we <= now:
+                    continue  # window already closed; can't trade
                 token_ids = json.loads(m.get("clobTokenIds") or "[]")
                 outcomes = json.loads(m.get("outcomes") or "[]")
                 paired = _pair_outcome_tokens(slug, outcomes, token_ids)

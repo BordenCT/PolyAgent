@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import time
 
 import pytest
 
@@ -11,8 +12,13 @@ from polyagent.services.quant.short_horizon.scanner import (
 )
 
 
+def _slug_for(end_ts: int, dur: str = "5m") -> str:
+    """Build a btc-updown slug whose window_end_ts is `end_ts`."""
+    return f"btc-updown-{dur}-{end_ts}"
+
+
 def test_parse_btc_5m_slug():
-    end_ts = 1_900_000_000
+    end_ts = int(time.time()) + 240  # window currently open, ends in 4 min
     slug = f"btc-updown-5m-{end_ts}"
     asset_id, ws, we, dur = parse_short_horizon_slug(slug)
     assert asset_id == "BTC"
@@ -51,7 +57,7 @@ class _FakeHttp:
 
 
 def test_scanner_returns_one_market_per_matching_slug():
-    end_ts = 1_900_000_000
+    end_ts = int(time.time()) + 240  # window currently open, ends in 4 min
     body = [{
         "slug": f"btc-updown-5m-{end_ts}",
         "conditionId": "0xabc",
@@ -82,7 +88,7 @@ def test_scanner_skips_non_matching_slugs():
 
 
 def test_scanner_handles_bad_token_ids_gracefully():
-    end_ts = 1_900_000_000
+    end_ts = int(time.time()) + 240  # window currently open, ends in 4 min
     body = [{
         "slug": f"btc-updown-5m-{end_ts}",
         "conditionId": "0xabc",
@@ -97,7 +103,7 @@ def test_scanner_pairs_tokens_by_outcome_label_not_position():
     """Regression: if Gamma returns outcomes in [Down, Up] order, the
     scanner must still bind token_id_yes to the Up-token, not blindly
     take token_ids[0]. Otherwise every trade flips silently."""
-    end_ts = 1_900_000_000
+    end_ts = int(time.time()) + 240  # window currently open, ends in 4 min
     body = [{
         "slug": f"btc-updown-5m-{end_ts}",
         "conditionId": "0xabc",
@@ -113,7 +119,7 @@ def test_scanner_pairs_tokens_by_outcome_label_not_position():
 
 
 def test_scanner_skips_market_with_missing_outcomes():
-    end_ts = 1_900_000_000
+    end_ts = int(time.time()) + 240  # window currently open, ends in 4 min
     body = [{
         "slug": f"btc-updown-5m-{end_ts}",
         "conditionId": "0xabc",
@@ -128,7 +134,7 @@ def test_scanner_skips_market_with_unrecognised_outcomes():
     """Categorical labels like Trump/Harris should not be entered as
     binary up/down trades, even if the slug regex coincidentally
     matched (which it shouldn't, but defense in depth)."""
-    end_ts = 1_900_000_000
+    end_ts = int(time.time()) + 240  # window currently open, ends in 4 min
     body = [{
         "slug": f"btc-updown-5m-{end_ts}",
         "conditionId": "0xabc",
@@ -139,10 +145,65 @@ def test_scanner_skips_market_with_unrecognised_outcomes():
     assert s.scan() == []
 
 
+def test_scanner_skips_far_future_windows():
+    """Polymarket lists 5m markets 24h in advance. The scanner must not
+    persist windows opening later than the orchestrator's next market poll
+    (~60s). Otherwise the 500-row Gamma page fills with tomorrow's
+    markets and live ones get pushed off."""
+    now = int(time.time())
+    body = [
+        # 5m market opening in 21 hours -> reject
+        {"slug": _slug_for(now + 21 * 3600 + 300),
+         "conditionId": "0x_far",
+         "clobTokenIds": json.dumps(["a", "b"]),
+         "outcomes": json.dumps(["Up", "Down"])},
+        # 5m market currently in its window -> accept
+        {"slug": _slug_for(now + 240),
+         "conditionId": "0x_live",
+         "clobTokenIds": json.dumps(["c", "d"]),
+         "outcomes": json.dumps(["Up", "Down"])},
+    ]
+    out = QuantShortScanner(http_client=_FakeHttp(body)).scan()
+    pm_ids = {m.polymarket_id for m in out}
+    assert "0x_live" in pm_ids
+    assert "0x_far" not in pm_ids
+
+
+def test_scanner_accepts_window_opening_within_lookahead():
+    """A market whose window opens within ~60s should still be picked up
+    (the next decider cycle will see it as live)."""
+    now = int(time.time())
+    body = [
+        # Opens 30s from now (30s into the lookahead)
+        {"slug": _slug_for(now + 30 + 300),
+         "conditionId": "0x_imminent",
+         "clobTokenIds": json.dumps(["a", "b"]),
+         "outcomes": json.dumps(["Up", "Down"])},
+    ]
+    out = QuantShortScanner(http_client=_FakeHttp(body)).scan()
+    assert len(out) == 1
+    assert out[0].polymarket_id == "0x_imminent"
+
+
+def test_scanner_skips_already_closed_windows():
+    """A market whose window has already closed cannot be entered.
+    Filtering it at scan-time keeps the active-markets list clean."""
+    now = int(time.time())
+    body = [
+        # Window ended 1 minute ago -> reject
+        {"slug": _slug_for(now - 60),
+         "conditionId": "0x_closed",
+         "clobTokenIds": json.dumps(["a", "b"]),
+         "outcomes": json.dumps(["Up", "Down"])},
+    ]
+    out = QuantShortScanner(http_client=_FakeHttp(body)).scan()
+    assert out == []
+
+
 def test_scanner_accepts_yes_no_labels():
     """Some PM markets use Yes/No instead of Up/Down for the same
     semantic axis."""
-    end_ts = 1_900_000_000
+    end_ts = int(time.time()) + 240  # window currently open, ends in 4 min
     body = [{
         "slug": f"btc-updown-5m-{end_ts}",
         "conditionId": "0xabc",
