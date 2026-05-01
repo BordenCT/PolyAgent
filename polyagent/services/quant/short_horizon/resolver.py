@@ -91,9 +91,11 @@ class QuantResolver:
         now = datetime.now(timezone.utc)
         markets = self._repo.get_unresolved_markets_past_end(now)
         resolved = 0
+        deferred = 0
         for m in markets:
             outcome = self._fetch_outcome(m)
             if outcome is None:
+                deferred += 1
                 continue
 
             start_spot, end_spot = self._diagnostic_spots(m)
@@ -116,8 +118,15 @@ class QuantResolver:
                 )
                 self._repo.update_trade_pnl(t["id"], pnl)
             resolved += 1
-        if resolved:
-            logger.info("resolved %d quant_short markets", resolved)
+        if markets:
+            # Always log when there's something past-end so the operator
+            # can distinguish "nothing to resolve" from "resolver tried
+            # but PM still pending". `pending_pm` typically clears within
+            # 5-15 min of window close as UMA finalises settlement.
+            logger.info(
+                "resolver: past_end=%d resolved=%d pending_pm=%d",
+                len(markets), resolved, deferred,
+            )
         return resolved
 
     def _fetch_outcome(self, market: dict) -> Optional[str]:
