@@ -33,7 +33,12 @@ import httpx
 
 logger = logging.getLogger("polyagent.services.quant.assets.sources.chainlink")
 
-_DEFAULT_RPC_URL = "https://polygon-rpc.com"
+# publicnode.com offers an open Polygon endpoint with no key required.
+# polygon-rpc.com (the previous default) started 401-ing unauthenticated
+# requests in mid-2026. Production should set POLYGON_RPC_URL to a
+# private RPC (Alchemy, QuickNode, dRPC, Ankr...) for reliability and
+# higher rate limits; this default is a best-effort fallback.
+_DEFAULT_RPC_URL = "https://polygon-bor-rpc.publicnode.com"
 _SECONDS_PER_YEAR = 365.25 * 24 * 3600
 
 # Polygon mainnet AggregatorV3 addresses for common crypto-USD pairs.

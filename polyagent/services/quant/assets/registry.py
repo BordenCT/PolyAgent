@@ -20,9 +20,16 @@ from polyagent.services.quant.core.vol import VolCalibration, VolMethod
 
 
 def _btc_chainlink_source() -> ChainlinkDataFeedSource:
-    """BTC source factory. RPC URL overridable via POLYGON_RPC_URL env."""
-    rpc_url = os.environ.get("POLYGON_RPC_URL", "https://polygon-rpc.com")
-    return ChainlinkDataFeedSource(pair="BTC-USD", rpc_url=rpc_url)
+    """BTC source factory. RPC URL overridable via POLYGON_RPC_URL env.
+
+    Without an override the source falls back to the bundled public
+    endpoint (see chainlink.py). Public endpoints rotate and rate-limit;
+    set POLYGON_RPC_URL to a private RPC for production runs.
+    """
+    rpc_url = os.environ.get("POLYGON_RPC_URL")
+    if rpc_url:
+        return ChainlinkDataFeedSource(pair="BTC-USD", rpc_url=rpc_url)
+    return ChainlinkDataFeedSource(pair="BTC-USD")
 
 
 ASSETS: dict[str, AssetSpec] = {
