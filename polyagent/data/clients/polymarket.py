@@ -16,6 +16,15 @@ logger = logging.getLogger("polyagent.clients.polymarket")
 
 _GAMMA_BASE = "https://gamma-api.polymarket.com"
 
+# CLOB binary markets label tokens with `outcome` strings that vary by
+# market type. Classical YES/NO markets use "Yes"/"No"; the BTC and ETH
+# short-horizon up/down markets use "Up"/"Down". Both map cleanly to the
+# bot's internal YES/NO axis (Up == YES == "spot moved up"). Any other
+# label (e.g. categorical markets like "Trump"/"Harris") is treated as
+# non-binary and pinned to a 0 midpoint by fetch_market_state, matching
+# pre-existing behavior.
+_YES_OUTCOME_LABELS = frozenset({"yes", "up"})
+
 
 class PolymarketClient:
     """Wraps the Polymarket CLOB REST API and CLI."""
@@ -186,7 +195,8 @@ class PolymarketClient:
 
                 tokens = raw.get("tokens") or []
                 yes_token = next(
-                    (t for t in tokens if str(t.get("outcome", "")).strip().lower() == "yes"),
+                    (t for t in tokens
+                     if str(t.get("outcome", "")).strip().lower() in _YES_OUTCOME_LABELS),
                     None,
                 )
                 winner_token = next(

@@ -154,6 +154,40 @@ class TestFetchMarketState:
         assert state["is_resolved"] is True
         assert state["midpoint_price"] == Decimal("0")
 
+    def test_resolved_updown_up_wins_pins_to_one(self):
+        """BTC/ETH up-down markets label tokens 'Up'/'Down' instead of
+        'Yes'/'No'. 'Up' is the YES-equivalent (spot moved up)."""
+        payload = {
+            "closed": True,
+            "best_bid": 0,
+            "best_ask": 0,
+            "tokens": [
+                {"token_id": "tok_up", "outcome": "Up", "winner": True},
+                {"token_id": "tok_down", "outcome": "Down", "winner": False},
+            ],
+        }
+        self.client._http.get = MagicMock(return_value=_clob_response(payload))
+        state = self.client.fetch_market_state("0xabc")
+        assert state is not None
+        assert state["is_resolved"] is True
+        assert state["midpoint_price"] == Decimal("1")
+
+    def test_resolved_updown_down_wins_pins_to_zero(self):
+        payload = {
+            "closed": True,
+            "best_bid": 0,
+            "best_ask": 0,
+            "tokens": [
+                {"token_id": "tok_up", "outcome": "Up", "winner": False},
+                {"token_id": "tok_down", "outcome": "Down", "winner": True},
+            ],
+        }
+        self.client._http.get = MagicMock(return_value=_clob_response(payload))
+        state = self.client.fetch_market_state("0xabc")
+        assert state is not None
+        assert state["is_resolved"] is True
+        assert state["midpoint_price"] == Decimal("0")
+
     def test_categorical_market_without_yes_token_defaults_to_zero(self):
         payload = {
             "closed": True,
