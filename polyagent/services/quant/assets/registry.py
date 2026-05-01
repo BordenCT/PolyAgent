@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 from dataclasses import replace
 
+from polyagent.services.quant.assets.sources.chainlink import ChainlinkDataFeedSource
 from polyagent.services.quant.assets.sources.coinbase import CoinbaseSpotSource
 from polyagent.services.quant.assets.spec import (
     AssetClass, AssetSpec, MarketFamily,
@@ -18,12 +19,24 @@ from polyagent.services.quant.assets.spec import (
 from polyagent.services.quant.core.vol import VolCalibration, VolMethod
 
 
+def _btc_chainlink_source() -> ChainlinkDataFeedSource:
+    """BTC source factory. RPC URL overridable via POLYGON_RPC_URL env."""
+    rpc_url = os.environ.get("POLYGON_RPC_URL", "https://polygon-rpc.com")
+    return ChainlinkDataFeedSource(pair="BTC-USD", rpc_url=rpc_url)
+
+
 ASSETS: dict[str, AssetSpec] = {
     "BTC": AssetSpec(
         asset_id="BTC",
         asset_class=AssetClass.CRYPTO,
-        price_source=lambda: CoinbaseSpotSource("BTC-USD"),
-        settlement_source=lambda: CoinbaseSpotSource("BTC-USD"),
+        # Chainlink Data Feed on Polygon: same oracle Polymarket settles on.
+        # Using the same source for decision and resolution keeps the
+        # estimator's strike reference aligned with the market's, removing
+        # the Coinbase-to-Chainlink basis drift that quant-validate showed
+        # was eating ~$15 over 46 paper trades. See
+        # docs/feat/btc-5m-roadmap.md Phase 3 for the design.
+        price_source=_btc_chainlink_source,
+        settlement_source=_btc_chainlink_source,
         default_vol=0.60,
         vol_calibration=VolCalibration(
             method=VolMethod.HYBRID,
@@ -36,11 +49,9 @@ ASSETS: dict[str, AssetSpec] = {
         supported_market_families=frozenset({
             MarketFamily.SHORT_HORIZON, MarketFamily.STRIKE, MarketFamily.RANGE,
         }),
-        # paper_only=True until we wire a Chainlink price source. Polymarket
-        # short-horizon BTC up/down markets settle on the Chainlink BTC/USD
-        # data stream, not Coinbase. Trading live with a Coinbase-priced
-        # estimator against Chainlink-resolved markets eats edge to basis.
-        # See docs/feat/btc-5m-roadmap.md Phase 3 for the swap.
+        # paper_only stays True until we accumulate ~24h of paper trades on
+        # the Chainlink-aligned source and confirm the |edge| -> outcome
+        # signal is calibrated. Flip via env when ready: QUANT_BTC_PAPER_ONLY=false.
         paper_only=True,
         fee_bps=0.0,
         edge_threshold=0.05,

@@ -79,25 +79,31 @@ ledger unification. All decision logic already exists; we're replacing
 a `quant_short_trades` insert with a position write through
 `ExecutorService.place_order`.
 
-## Phase 3 — Chainlink Data Streams swap
+## Phase 3 — Chainlink Data Feed swap (DONE, Data Streams pending)
 
-**Gate (either condition):**
-- Phase 2 live numbers show Coinbase→Chainlink basis is eating
-  meaningful edge (empirically: ~1/3 of gross P&L lost to basis mis-
-  resolution), OR
-- Polymarket's sponsored Chainlink key arrives.
+Trigger arrived early: `polyagent quant-validate` showed 43% of paper-trade
+outcomes disagreed with Polymarket settlements, with a $15 bias over 46
+trades. Root cause was Coinbase-to-Chainlink basis on near-flat 5m and
+15m windows.
 
-**Build:** add a `ChainlinkSpotSource` subclass implementing the same
-three methods (`tick`, `current`, `realized_vol`) as
-`BtcSpotSource`. Config swap (an env var selects which source the
-worker wires up). Zero other changes — the `BtcSpotSource` interface
-was explicitly designed for this swap in Phase 1.
+**Built:** `ChainlinkDataFeedSource` reads the on-chain Polygon
+AggregatorV3 contract for BTC/USD via JSON-RPC `eth_call`. Implements
+both PriceSource (`tick`, `current`, `realized_vol`) and
+SettlementSource (`price_at`, `source_id`) protocols, so registry swap
+was a one-line factory change. RPC endpoint is overridable via
+`POLYGON_RPC_URL` env (defaults to `https://polygon-rpc.com`).
 
-Historical Chainlink data is not archived by Chainlink, so after the
-swap we'll also start recording our own Data Streams ticks into a new
-table if we need vol calibration continuity across restarts.
+`paper_only=True` stays on until ~24h of paper trades on the new source
+confirm the gate calibration is sane; flip via `QUANT_BTC_PAPER_ONLY=false`
+when ready.
 
-**Effort:** ~1 day.
+**Still open:** Chainlink Data Streams (the off-chain low-latency feed,
+~1s update vs ~60s on-chain heartbeat) requires a sponsored API key
+from Polymarket. Worth pursuing if Phase 4 latency telemetry shows the
+60s heartbeat is bleeding edge to other 5m traders.
+
+**Effort actual:** ~half day (Data Feed via Polygon RPC, no web3.py dep,
+manual ABI encoding).
 
 ## Phase 4 — Latency upgrades (likely unnecessary)
 
