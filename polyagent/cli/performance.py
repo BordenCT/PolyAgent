@@ -81,12 +81,12 @@ def perf(daily: bool, by_strategy: bool, by_category: bool):
         cur.execute("""
             SELECT
                 COUNT(*) FILTER (WHERE pnl IS NOT NULL)              AS resolved,
-                COUNT(*) FILTER (WHERE pnl > 0)                      AS wins,
-                COUNT(*) FILTER (WHERE pnl <= 0)                     AS losses,
+                COUNT(*) FILTER (WHERE won)                          AS wins,
+                COUNT(*) FILTER (WHERE NOT won)                      AS losses,
                 COALESCE(SUM(pnl), 0)                                AS total_pnl,
                 COALESCE(AVG(pnl) FILTER (WHERE pnl IS NOT NULL), 0) AS avg_pnl,
-                COALESCE(AVG(ABS(edge_at_decision)) FILTER (WHERE pnl IS NOT NULL), 0) AS avg_edge
-            FROM quant_short_trades
+                COALESCE(AVG(abs_edge) FILTER (WHERE pnl IS NOT NULL), 0) AS avg_edge
+            FROM quant_short_v
         """)
         qs = cur.fetchone()
 

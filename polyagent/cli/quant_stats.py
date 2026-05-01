@@ -9,56 +9,53 @@ from polyagent.infra.config import Settings
 from polyagent.infra.database import Database
 
 
-# NOTE: ``avg_edge`` reports magnitude (AVG of ABS), since edge_at_decision is
-# stored signed (p_up - mid). Direction is captured by the trade's side
-# (YES/NO); for performance reporting we want |edge| so NO-side trades aren't
-# misread as negative-EV. Decision-time gate at decider.py:154 also uses |edge|.
+# All queries read from the `quant_short_v` view (see migration 007), which
+# pre-joins quant_short_trades + quant_short_markets and exposes derived
+# fields (`abs_edge`, `won`, `window_minutes`). Adding a new analytic just
+# means selecting from the view, not modifying tables or repeating joins.
 STATS_QUERY_TOTAL = """
     SELECT
-        COUNT(*)                                                   AS trades,
-        COUNT(*) FILTER (WHERE pnl > 0)                            AS wins,
-        COUNT(*) FILTER (WHERE pnl <= 0)                           AS losses,
-        COALESCE(AVG(ABS(edge_at_decision)), 0)                    AS avg_edge,
-        COALESCE(SUM(pnl), 0)                                      AS total_pnl,
-        COALESCE(AVG(pnl), 0)                                      AS avg_pnl,
-        COALESCE(AVG(vol_at_decision), 0)                          AS avg_vol
-    FROM quant_short_trades t
-    JOIN quant_short_markets m ON m.id = t.market_id
-    WHERE t.pnl IS NOT NULL
-      AND (%(asset)s::text IS NULL OR m.asset_id = %(asset)s)
+        COUNT(*)                            AS trades,
+        COUNT(*) FILTER (WHERE won)         AS wins,
+        COUNT(*) FILTER (WHERE NOT won)     AS losses,
+        COALESCE(AVG(abs_edge), 0)          AS avg_edge,
+        COALESCE(SUM(pnl), 0)               AS total_pnl,
+        COALESCE(AVG(pnl), 0)               AS avg_pnl,
+        COALESCE(AVG(vol_at_decision), 0)   AS avg_vol
+    FROM quant_short_v
+    WHERE pnl IS NOT NULL
+      AND (%(asset)s::text IS NULL OR asset_id = %(asset)s)
 """
 
 STATS_QUERY_BY_DURATION = """
     SELECT
-        m.window_duration_s                                        AS window_duration_s,
-        COUNT(*)                                                   AS trades,
-        COUNT(*) FILTER (WHERE t.pnl > 0)                          AS wins,
-        COUNT(*) FILTER (WHERE t.pnl <= 0)                         AS losses,
-        COALESCE(AVG(ABS(t.edge_at_decision)), 0)                  AS avg_edge,
-        COALESCE(SUM(t.pnl), 0)                                    AS total_pnl,
-        COALESCE(AVG(t.pnl), 0)                                    AS avg_pnl
-    FROM quant_short_trades t
-    JOIN quant_short_markets m ON m.id = t.market_id
-    WHERE t.pnl IS NOT NULL
-      AND (%(asset)s::text IS NULL OR m.asset_id = %(asset)s)
-    GROUP BY m.window_duration_s
-    ORDER BY m.window_duration_s
+        window_duration_s,
+        COUNT(*)                            AS trades,
+        COUNT(*) FILTER (WHERE won)         AS wins,
+        COUNT(*) FILTER (WHERE NOT won)     AS losses,
+        COALESCE(AVG(abs_edge), 0)          AS avg_edge,
+        COALESCE(SUM(pnl), 0)               AS total_pnl,
+        COALESCE(AVG(pnl), 0)               AS avg_pnl
+    FROM quant_short_v
+    WHERE pnl IS NOT NULL
+      AND (%(asset)s::text IS NULL OR asset_id = %(asset)s)
+    GROUP BY window_duration_s
+    ORDER BY window_duration_s
 """
 
 STATS_QUERY_BY_ASSET = """
     SELECT
-        m.asset_id                                                 AS asset_id,
-        COUNT(*)                                                   AS trades,
-        COUNT(*) FILTER (WHERE t.pnl > 0)                          AS wins,
-        COUNT(*) FILTER (WHERE t.pnl <= 0)                         AS losses,
-        COALESCE(AVG(ABS(t.edge_at_decision)), 0)                  AS avg_edge,
-        COALESCE(SUM(t.pnl), 0)                                    AS total_pnl,
-        COALESCE(AVG(t.pnl), 0)                                    AS avg_pnl
-    FROM quant_short_trades t
-    JOIN quant_short_markets m ON m.id = t.market_id
-    WHERE t.pnl IS NOT NULL
-    GROUP BY m.asset_id
-    ORDER BY m.asset_id
+        asset_id,
+        COUNT(*)                            AS trades,
+        COUNT(*) FILTER (WHERE won)         AS wins,
+        COUNT(*) FILTER (WHERE NOT won)     AS losses,
+        COALESCE(AVG(abs_edge), 0)          AS avg_edge,
+        COALESCE(SUM(pnl), 0)               AS total_pnl,
+        COALESCE(AVG(pnl), 0)               AS avg_pnl
+    FROM quant_short_v
+    WHERE pnl IS NOT NULL
+    GROUP BY asset_id
+    ORDER BY asset_id
 """
 
 
