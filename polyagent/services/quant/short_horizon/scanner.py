@@ -23,6 +23,12 @@ logger = logging.getLogger("polyagent.services.quant.short_horizon.scanner")
 _GAMMA_MARKETS_URL = "https://gamma-api.polymarket.com/markets"
 _UNIT_TO_SECONDS = {"m": 60, "h": 3600, "d": 86400}
 
+# Token-label pairings for binary markets. "Up" maps to the YES axis on
+# our side ("price went up" == "YES wins"), "Down" maps to NO.
+# Same set lives in polyagent.data.clients.polymarket; both must agree.
+_YES_OUTCOME_LABELS = frozenset({"yes", "up"})
+_NO_OUTCOME_LABELS = frozenset({"no", "down"})
+
 
 def _build_slug_regex() -> re.Pattern[str]:
     """Return a compiled regex matching any registered short-horizon slug.
@@ -46,6 +52,52 @@ def _duration_to_seconds(token: str) -> int:
     if n <= 0:
         raise ValueError(f"non-positive duration: {token!r}")
     return n * _UNIT_TO_SECONDS[token[-1]]
+
+
+def _pair_outcome_tokens(
+    slug: str,
+    outcomes: list,
+    token_ids: list,
+) -> tuple[str, str] | None:
+    """Pair (token_id_yes, token_id_no) by reading outcome labels.
+
+    Earlier the scanner trusted ``token_ids[0]`` to be the YES side and
+    ``token_ids[1]`` the NO side by position. Polymarket's Gamma API
+    pairs ``outcomes`` to ``clobTokenIds`` by index but the binding is
+    not guaranteed to be in any particular order, so a ``[Down, Up]``
+    response would silently flip every trade onto the wrong token.
+
+    This pair-by-label helper makes the binding explicit. Returns None
+    (and logs) when the input is malformed or the labels can't be
+    interpreted, so the scanner can skip the market instead of writing
+    a corrupted row.
+    """
+    if not isinstance(outcomes, list) or not isinstance(token_ids, list):
+        logger.warning("non-list outcomes/tokens for %s", slug)
+        return None
+    if len(outcomes) != 2 or len(token_ids) != 2:
+        logger.warning(
+            "expected 2 outcomes and 2 tokens for %s, got outcomes=%d tokens=%d",
+            slug, len(outcomes), len(token_ids),
+        )
+        return None
+    yes_idx = next(
+        (i for i, o in enumerate(outcomes)
+         if str(o).strip().lower() in _YES_OUTCOME_LABELS),
+        None,
+    )
+    no_idx = next(
+        (i for i, o in enumerate(outcomes)
+         if str(o).strip().lower() in _NO_OUTCOME_LABELS),
+        None,
+    )
+    if yes_idx is None or no_idx is None or yes_idx == no_idx:
+        logger.warning(
+            "could not pair outcome labels for %s: outcomes=%s",
+            slug, outcomes,
+        )
+        return None
+    return token_ids[yes_idx], token_ids[no_idx]
 
 
 def parse_short_horizon_slug(slug: str) -> tuple[str, datetime, datetime, int]:
@@ -130,13 +182,16 @@ class QuantShortScanner:
             try:
                 asset_id, ws, we, dur = parse_short_horizon_slug(slug)
                 token_ids = json.loads(m.get("clobTokenIds") or "[]")
-                if len(token_ids) < 2:
+                outcomes = json.loads(m.get("outcomes") or "[]")
+                paired = _pair_outcome_tokens(slug, outcomes, token_ids)
+                if paired is None:
                     continue
+                token_id_yes, token_id_no = paired
                 out.append(QuantShortMarket(
                     polymarket_id=m.get("conditionId") or "",
                     slug=slug,
-                    token_id_yes=token_ids[0],
-                    token_id_no=token_ids[1],
+                    token_id_yes=token_id_yes,
+                    token_id_no=token_id_no,
                     window_duration_s=dur,
                     window_start_ts=ws,
                     window_end_ts=we,

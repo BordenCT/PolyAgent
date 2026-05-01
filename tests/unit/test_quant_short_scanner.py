@@ -56,6 +56,7 @@ def test_scanner_returns_one_market_per_matching_slug():
         "slug": f"btc-updown-5m-{end_ts}",
         "conditionId": "0xabc",
         "clobTokenIds": json.dumps(["yes_id", "no_id"]),
+        "outcomes": json.dumps(["Up", "Down"]),
     }]
     s = QuantShortScanner(http_client=_FakeHttp(body))
     out = s.scan()
@@ -70,9 +71,11 @@ def test_scanner_returns_one_market_per_matching_slug():
 def test_scanner_skips_non_matching_slugs():
     body = [
         {"slug": "doge-updown-5m-1900000000", "conditionId": "0x1",
-         "clobTokenIds": json.dumps(["a", "b"])},
+         "clobTokenIds": json.dumps(["a", "b"]),
+         "outcomes": json.dumps(["Up", "Down"])},
         {"slug": "some-unrelated-market", "conditionId": "0x2",
-         "clobTokenIds": json.dumps(["c", "d"])},
+         "clobTokenIds": json.dumps(["c", "d"]),
+         "outcomes": json.dumps(["Up", "Down"])},
     ]
     s = QuantShortScanner(http_client=_FakeHttp(body))
     assert s.scan() == []
@@ -84,9 +87,73 @@ def test_scanner_handles_bad_token_ids_gracefully():
         "slug": f"btc-updown-5m-{end_ts}",
         "conditionId": "0xabc",
         "clobTokenIds": json.dumps(["only_one"]),
+        "outcomes": json.dumps(["Up", "Down"]),
     }]
     s = QuantShortScanner(http_client=_FakeHttp(body))
     assert s.scan() == []
+
+
+def test_scanner_pairs_tokens_by_outcome_label_not_position():
+    """Regression: if Gamma returns outcomes in [Down, Up] order, the
+    scanner must still bind token_id_yes to the Up-token, not blindly
+    take token_ids[0]. Otherwise every trade flips silently."""
+    end_ts = 1_900_000_000
+    body = [{
+        "slug": f"btc-updown-5m-{end_ts}",
+        "conditionId": "0xabc",
+        # Order intentionally inverted vs the prior test.
+        "clobTokenIds": json.dumps(["down_id", "up_id"]),
+        "outcomes": json.dumps(["Down", "Up"]),
+    }]
+    s = QuantShortScanner(http_client=_FakeHttp(body))
+    out = s.scan()
+    assert len(out) == 1
+    assert out[0].token_id_yes == "up_id"
+    assert out[0].token_id_no == "down_id"
+
+
+def test_scanner_skips_market_with_missing_outcomes():
+    end_ts = 1_900_000_000
+    body = [{
+        "slug": f"btc-updown-5m-{end_ts}",
+        "conditionId": "0xabc",
+        "clobTokenIds": json.dumps(["a", "b"]),
+        # outcomes field absent
+    }]
+    s = QuantShortScanner(http_client=_FakeHttp(body))
+    assert s.scan() == []
+
+
+def test_scanner_skips_market_with_unrecognised_outcomes():
+    """Categorical labels like Trump/Harris should not be entered as
+    binary up/down trades, even if the slug regex coincidentally
+    matched (which it shouldn't, but defense in depth)."""
+    end_ts = 1_900_000_000
+    body = [{
+        "slug": f"btc-updown-5m-{end_ts}",
+        "conditionId": "0xabc",
+        "clobTokenIds": json.dumps(["a", "b"]),
+        "outcomes": json.dumps(["Trump", "Harris"]),
+    }]
+    s = QuantShortScanner(http_client=_FakeHttp(body))
+    assert s.scan() == []
+
+
+def test_scanner_accepts_yes_no_labels():
+    """Some PM markets use Yes/No instead of Up/Down for the same
+    semantic axis."""
+    end_ts = 1_900_000_000
+    body = [{
+        "slug": f"btc-updown-5m-{end_ts}",
+        "conditionId": "0xabc",
+        "clobTokenIds": json.dumps(["yes_id", "no_id"]),
+        "outcomes": json.dumps(["Yes", "No"]),
+    }]
+    s = QuantShortScanner(http_client=_FakeHttp(body))
+    out = s.scan()
+    assert len(out) == 1
+    assert out[0].token_id_yes == "yes_id"
+    assert out[0].token_id_no == "no_id"
 
 
 def test_scanner_requests_newest_first():
