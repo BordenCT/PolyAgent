@@ -80,7 +80,7 @@ def _render_breakdown(console: Console, rows, title: str, key_col: str, key_fmt)
     table.add_column("Avg P&L", justify="right")
     table.add_column("Total P&L", justify="right")
     if not rows:
-        table.add_row("(none)", "0", "-", "-", "-", "-", "$0.0000")
+        table.add_row("(none)", "0", "-", "-", "-", "-", "$0.00")
     else:
         for r in rows:
             trades = int(r["trades"])
@@ -98,7 +98,7 @@ def _render_breakdown(console: Console, rows, title: str, key_col: str, key_fmt)
                 f"{win_pct:.1f}%",
                 f"{avg_edge:.4f}",
                 f"${avg_pnl:+,.2f}",
-                f"[{pnl_style}]${total_pnl:+,.4f}[/{pnl_style}]",
+                f"[{pnl_style}]${total_pnl:+,.2f}[/{pnl_style}]",
             )
     console.print(table)
 
@@ -177,7 +177,7 @@ def quant_stats(asset: str | None, by_duration: bool, by_asset: bool) -> None:
         table.add_row("Win%", f"{win_pct:.1f}%")
         table.add_row("Avg |Edge|", f"{avg_edge:.4f}")
         table.add_row("Avg P&L", f"${avg_pnl:+,.2f}")
-        table.add_row("Total P&L", f"[{pnl_style}]${total_pnl:+,.4f}[/{pnl_style}]")
+        table.add_row("Total P&L", f"[{pnl_style}]${total_pnl:+,.2f}[/{pnl_style}]")
         table.add_row("Avg Realized Vol", f"{avg_vol:.3f}")
 
         console.print(table)
