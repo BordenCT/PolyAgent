@@ -62,7 +62,12 @@ ASSETS: dict[str, AssetSpec] = {
         paper_only=True,
         fee_bps=0.0,
         edge_threshold=0.05,
-        tick_interval_s=2.0,
+        # Chainlink Polygon BTC/USD heartbeats roughly every 60s (or
+        # earlier on >0.5% deviation). Ticking faster than that just
+        # burns free-tier RPC quota for no new data; 30s gives 2x
+        # oversampling against the heartbeat. If you wire a private RPC
+        # with sub-second budget, drop this back to 2.0 for finer vol.
+        tick_interval_s=30.0,
         slug_token="btc",
         question_keywords=("Bitcoin", "BTC"),
     ),
