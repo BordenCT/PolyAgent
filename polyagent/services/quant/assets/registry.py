@@ -19,31 +19,49 @@ from polyagent.services.quant.assets.spec import (
 from polyagent.services.quant.core.vol import VolCalibration, VolMethod
 
 
-def _btc_chainlink_source() -> ChainlinkDataFeedSource:
-    """BTC source factory. RPC URL overridable via POLYGON_RPC_URL env.
+def _btc_source():
+    """BTC price+settlement source.
 
-    Without an override the source falls back to the bundled public
-    endpoint (see chainlink.py). Public endpoints rotate and rate-limit;
-    set POLYGON_RPC_URL to a private RPC for production runs.
+    Picks at construction time:
+      - Chainlink Polygon BTC/USD when POLYGON_RPC_URL is set in env,
+      - Coinbase BTC-USD otherwise.
+
+    Chainlink aligns with Polymarket's settlement oracle (see
+    docs/feat/btc-5m-roadmap.md Phase 3) and removes the basis drift
+    that inflates paper-P&L relative to actual PM outcomes. But
+    Chainlink is on-chain and free public Polygon RPCs throttle our
+    poll loop; without a private endpoint the source returns None on
+    most calls, the decider's start_spot lazy-fetch falls back to
+    current_spot (S == K), p_up collapses to ~0.5, edge collapses
+    below threshold, and no markets are entered.
+
+    Coinbase has generous rate limits and ticks reliably at the
+    sub-second cadence the orchestrator uses, so the bot keeps
+    trading. The resolver uses Polymarket's actual settlement
+    (PolymarketClient.fetch_market_state) regardless of which source
+    is configured, so accounting stays honest either way; only the
+    decider's entry-time edge calculation is affected.
+
+    Set POLYGON_RPC_URL=<private endpoint URL> to flip to Chainlink.
     """
     rpc_url = os.environ.get("POLYGON_RPC_URL")
     if rpc_url:
         return ChainlinkDataFeedSource(pair="BTC-USD", rpc_url=rpc_url)
-    return ChainlinkDataFeedSource(pair="BTC-USD")
+    return CoinbaseSpotSource("BTC-USD")
 
 
 ASSETS: dict[str, AssetSpec] = {
     "BTC": AssetSpec(
         asset_id="BTC",
         asset_class=AssetClass.CRYPTO,
-        # Chainlink Data Feed on Polygon: same oracle Polymarket settles on.
-        # Using the same source for decision and resolution keeps the
-        # estimator's strike reference aligned with the market's, removing
-        # the Coinbase-to-Chainlink basis drift that quant-validate showed
-        # was eating ~$15 over 46 paper trades. See
-        # docs/feat/btc-5m-roadmap.md Phase 3 for the design.
-        price_source=_btc_chainlink_source,
-        settlement_source=_btc_chainlink_source,
+        # Source choice is env-conditional inside _btc_source():
+        # Chainlink (settlement-aligned but rate-limited) when
+        # POLYGON_RPC_URL is set, Coinbase (fast, free) otherwise.
+        # Resolver always uses Polymarket truth for the outcome, so
+        # accounting is correct either way; only the entry-time edge
+        # calculation is affected by the source choice.
+        price_source=_btc_source,
+        settlement_source=_btc_source,
         default_vol=0.60,
         vol_calibration=VolCalibration(
             method=VolMethod.HYBRID,
@@ -62,12 +80,12 @@ ASSETS: dict[str, AssetSpec] = {
         paper_only=True,
         fee_bps=0.0,
         edge_threshold=0.05,
-        # Chainlink Polygon BTC/USD heartbeats roughly every 60s (or
-        # earlier on >0.5% deviation). Ticking faster than that just
-        # burns free-tier RPC quota for no new data; 30s gives 2x
-        # oversampling against the heartbeat. If you wire a private RPC
-        # with sub-second budget, drop this back to 2.0 for finer vol.
-        tick_interval_s=30.0,
+        # 2s tick frequency works for Coinbase (the default source) and
+        # gives the rolling-vol calibration ~150 samples per 5m window.
+        # If POLYGON_RPC_URL is set so Chainlink becomes the source,
+        # consider raising this to 30s to stay under free-tier rate
+        # limits (Chainlink heartbeats every ~60s anyway).
+        tick_interval_s=2.0,
         slug_token="btc",
         question_keywords=("Bitcoin", "BTC"),
     ),
