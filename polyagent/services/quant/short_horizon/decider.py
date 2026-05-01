@@ -92,7 +92,7 @@ class QuantDecider:
 
         Skip conditions, in order:
         - per-cycle trade cap reached,
-        - market already has a trade,
+        - market already has a trade (silent: expected, dominates the log),
         - no spec registered for ``asset_id``,
         - per-asset open-position cap reached,
         - no live price source for ``asset_id`` or no current spot,
@@ -100,35 +100,59 @@ class QuantDecider:
         - no book mid available,
         - absolute edge below ``spec.edge_threshold``,
         - gross edge does not exceed assumed fees.
+
+        Every skip except ``already_traded`` emits a one-line INFO log
+        prefixed with ``SKIP <slug> reason=<code>``, plus a few key=value
+        diagnostic fields, so the operator can grep by reason to see why
+        the bot isn't entering markets:
+
+            grep SKIP output.log | grep "reason=open_cap"
         """
+        slug = market_row.get("slug") or market_row.get("polymarket_id") or "?"
+
         if self._opened_this_cycle >= self._max_per_cycle:
+            self._log_skip(slug, "cycle_cap",
+                           opened=self._opened_this_cycle,
+                           limit=self._max_per_cycle)
             return
 
         market_id = market_row["id"]
         if self._repo.get_trades_for_market(market_id):
+            # Intentionally silent. Once a market has any trade row, we
+            # never re-enter; logging this on every cycle would drown
+            # the more interesting skip reasons.
             return
 
         asset_id = market_row.get("asset_id") or "BTC"
         base_spec = get(asset_id)
         if base_spec is None:
             logger.warning("no spec for asset_id=%s, skipping market %s", asset_id, market_id)
+            self._log_skip(slug, "no_spec", asset=asset_id)
             return
         spec = apply_env_overrides(base_spec)
 
-        if self._repo.count_open_trades_for_asset(asset_id) >= self._max_open_per_asset:
+        open_count = self._repo.count_open_trades_for_asset(asset_id)
+        if open_count >= self._max_open_per_asset:
+            self._log_skip(slug, "open_cap",
+                           asset=asset_id,
+                           open=open_count,
+                           limit=self._max_open_per_asset)
             return
 
         source = self._sources.get(asset_id)
         if source is None:
+            self._log_skip(slug, "no_source", asset=asset_id)
             return
         spot = source.current()
         if spot is None:
+            self._log_skip(slug, "no_spot", asset=asset_id)
             return
 
         window_end = market_row["window_end_ts"]
         now = datetime.now(timezone.utc)
         ttm = (window_end - now).total_seconds()
         if ttm <= 0:
+            self._log_skip(slug, "window_closed", ttm=f"{ttm:.0f}")
             return
 
         start_spot_raw = market_row.get("start_spot")
@@ -146,18 +170,27 @@ class QuantDecider:
 
         book = self._book.fetch_mid(market_row["token_id_yes"])
         if book is None:
+            self._log_skip(slug, "no_book", token=market_row["token_id_yes"])
             return
         bid, ask = book
         mid = (float(bid) + float(ask)) / 2.0
 
         edge = p_up - mid
         if abs(edge) < spec.edge_threshold:
+            self._log_skip(slug, "edge_below_threshold",
+                           edge=f"{edge:+.4f}",
+                           threshold=f"{spec.edge_threshold:.4f}",
+                           p_up=f"{p_up:.4f}",
+                           mid=f"{mid:.4f}")
             return
 
         size_fraction = float(self._size)
         gross_edge_usd = abs(edge) * size_fraction
         fees_usd = size_fraction * spec.fee_bps / 10_000.0
         if gross_edge_usd <= fees_usd:
+            self._log_skip(slug, "fees_above_edge",
+                           gross_edge=f"{gross_edge_usd:.4f}",
+                           fees=f"{fees_usd:.4f}")
             return
 
         if edge > 0:
@@ -178,6 +211,19 @@ class QuantDecider:
         self._repo.insert_trade(trade)
         self._opened_this_cycle += 1
         logger.info(
-            "PAPER %s on %s: side=%s edge=%+.3f p_up=%.3f mid=%.3f",
-            asset_id, market_row["polymarket_id"], side, edge, p_up, mid,
+            "PAPER %s side=%s edge=%+.4f p_up=%.4f mid=%.4f asset=%s",
+            slug, side, edge, p_up, mid, asset_id,
         )
+
+    @staticmethod
+    def _log_skip(slug: str, reason: str, **fields) -> None:
+        """Emit ``SKIP <slug> reason=<code> [k=v ...]`` for the operator.
+
+        Single line per skip so ``grep SKIP`` is the natural read pattern.
+        ``grep "reason=<code>"`` filters by gate.
+        """
+        if fields:
+            extra = " ".join(f"{k}={v}" for k, v in fields.items())
+            logger.info("SKIP %s reason=%s %s", slug, reason, extra)
+        else:
+            logger.info("SKIP %s reason=%s", slug, reason)

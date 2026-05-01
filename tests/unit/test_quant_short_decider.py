@@ -279,3 +279,113 @@ def test_decider_uses_existing_start_spot_without_settlement_call():
     d.evaluate(row)
     assert "m1" not in repo.start_spots  # set_start_spot not called
     assert len(repo.inserted) == 1
+
+
+# Skip-log tests: lock the format that operators grep against.
+# `grep SKIP output.log | grep "reason=<code>"` must keep working.
+
+class TestSkipLogging:
+    def _decider(self, repo, *, sources=None, book=None, settlements=None,
+                 max_per_cycle=5, max_open_per_asset=3, size="5"):
+        return QuantDecider(
+            sources=sources or {"BTC": _FakeSrc(Decimal("60000"))},
+            book=book or _FakeBook((Decimal("0.49"), Decimal("0.51"))),
+            repo=repo,
+            position_size_usd=Decimal(size),
+            max_trades_per_cycle=max_per_cycle,
+            max_open_per_asset=max_open_per_asset,
+            settlements=settlements,
+        )
+
+    def _row_with_slug(self, slug="btc-updown-5m-1700000000"):
+        row = _row()
+        row["slug"] = slug
+        return row
+
+    def test_already_traded_is_silent(self, caplog):
+        """The most common skip reason. Logging it would dominate the log."""
+        repo = _FakeRepo()
+        repo.trades_for["m1"] = [{"id": "t1"}]
+        d = self._decider(repo)
+        with caplog.at_level("INFO", logger="polyagent.services.quant.short_horizon.decider"):
+            d.evaluate(self._row_with_slug())
+        assert not any("SKIP" in r.message for r in caplog.records)
+
+    def test_open_cap_logged(self, caplog):
+        repo = _FakeRepo(open_per_asset={"BTC": 3})
+        d = self._decider(repo, max_open_per_asset=3)
+        with caplog.at_level("INFO", logger="polyagent.services.quant.short_horizon.decider"):
+            d.evaluate(self._row_with_slug("btc-updown-5m-A"))
+        msg = next(r.message for r in caplog.records if "SKIP" in r.message)
+        assert "SKIP btc-updown-5m-A" in msg
+        assert "reason=open_cap" in msg
+        assert "open=3" in msg
+        assert "limit=3" in msg
+
+    def test_cycle_cap_logged(self, caplog):
+        repo = _FakeRepo()
+        d = self._decider(repo, max_per_cycle=0)
+        with caplog.at_level("INFO", logger="polyagent.services.quant.short_horizon.decider"):
+            d.evaluate(self._row_with_slug("btc-updown-5m-B"))
+        msg = next(r.message for r in caplog.records if "SKIP" in r.message)
+        assert "reason=cycle_cap" in msg
+        assert "limit=0" in msg
+
+    def test_no_spot_logged(self, caplog):
+        repo = _FakeRepo()
+        d = self._decider(repo, sources={"BTC": _FakeSrc(None)})
+        with caplog.at_level("INFO", logger="polyagent.services.quant.short_horizon.decider"):
+            d.evaluate(self._row_with_slug("btc-updown-5m-C"))
+        msg = next(r.message for r in caplog.records if "SKIP" in r.message)
+        assert "reason=no_spot" in msg
+        assert "asset=BTC" in msg
+
+    def test_window_closed_logged(self, caplog):
+        repo = _FakeRepo()
+        d = self._decider(repo)
+        row = self._row_with_slug("btc-updown-5m-D")
+        row["window_end_ts"] = datetime.now(timezone.utc) - timedelta(seconds=10)
+        with caplog.at_level("INFO", logger="polyagent.services.quant.short_horizon.decider"):
+            d.evaluate(row)
+        msg = next(r.message for r in caplog.records if "SKIP" in r.message)
+        assert "reason=window_closed" in msg
+
+    def test_no_book_logged(self, caplog):
+        class _NoBook:
+            def fetch_mid(self, _): return None
+        repo = _FakeRepo()
+        d = self._decider(repo, book=_NoBook())
+        with caplog.at_level("INFO", logger="polyagent.services.quant.short_horizon.decider"):
+            d.evaluate(self._row_with_slug("btc-updown-5m-E"))
+        msg = next(r.message for r in caplog.records if "SKIP" in r.message)
+        assert "reason=no_book" in msg
+        assert "token=yes_id" in msg
+
+    def test_edge_below_threshold_logged_with_diagnostics(self, caplog):
+        repo = _FakeRepo()
+        # Mid ~0.50 against spot==start_spot → p_up≈0.5 → edge≈0
+        sources = {"BTC": _FakeSrc(Decimal("60000"))}
+        book = _FakeBook((Decimal("0.49"), Decimal("0.51")))
+        d = self._decider(repo, sources=sources, book=book)
+        row = self._row_with_slug("btc-updown-5m-F")
+        row["start_spot"] = Decimal("60000")  # match spot exactly
+        with caplog.at_level("INFO", logger="polyagent.services.quant.short_horizon.decider"):
+            d.evaluate(row)
+        msg = next(r.message for r in caplog.records if "SKIP" in r.message)
+        assert "reason=edge_below_threshold" in msg
+        assert "threshold=0.0500" in msg
+        assert "p_up=" in msg
+        assert "mid=" in msg
+
+    def test_skip_log_format_is_grep_friendly(self, caplog):
+        """Lock the leading-prefix shape: `SKIP <slug> reason=<code>`."""
+        repo = _FakeRepo(open_per_asset={"BTC": 3})
+        d = self._decider(repo, max_open_per_asset=3)
+        with caplog.at_level("INFO", logger="polyagent.services.quant.short_horizon.decider"):
+            d.evaluate(self._row_with_slug("btc-updown-5m-Z"))
+        # First two tokens must be "SKIP" then the slug.
+        msg = next(r.message for r in caplog.records if "SKIP" in r.message)
+        tokens = msg.split()
+        assert tokens[0] == "SKIP"
+        assert tokens[1] == "btc-updown-5m-Z"
+        assert tokens[2].startswith("reason=")
