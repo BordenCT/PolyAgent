@@ -85,7 +85,7 @@ def perf(daily: bool, by_strategy: bool, by_category: bool):
                 COUNT(*) FILTER (WHERE pnl <= 0)                     AS losses,
                 COALESCE(SUM(pnl), 0)                                AS total_pnl,
                 COALESCE(AVG(pnl) FILTER (WHERE pnl IS NOT NULL), 0) AS avg_pnl,
-                COALESCE(AVG(edge_at_decision) FILTER (WHERE pnl IS NOT NULL), 0) AS avg_edge
+                COALESCE(AVG(ABS(edge_at_decision)) FILTER (WHERE pnl IS NOT NULL), 0) AS avg_edge
             FROM quant_short_trades
         """)
         qs = cur.fetchone()
@@ -107,9 +107,9 @@ def perf(daily: bool, by_strategy: bool, by_category: bool):
         qs_style = "green" if qs_pnl >= 0 else "red"
         qs_table.add_row("Resolved Trades", str(qs_resolved))
         qs_table.add_row("Win/Loss", f"{qs_wins}/{qs_losses} ({qs_win_pct:.1f}%)")
-        qs_table.add_row("Total P&L", f"[{qs_style}]${qs_pnl:+,.2f}[/{qs_style}]")
+        qs_table.add_row("Total P&L", f"[{qs_style}]${qs_pnl:+,.4f}[/{qs_style}]")
         qs_table.add_row("Avg P&L/Trade", f"${qs_avg:+,.2f}")
-        qs_table.add_row("Avg Edge", f"{qs_edge:+.3f}")
+        qs_table.add_row("Avg |Edge|", f"{qs_edge:.4f}")
     console.print(qs_table)
 
     db.close()

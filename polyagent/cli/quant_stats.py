@@ -9,12 +9,16 @@ from polyagent.infra.config import Settings
 from polyagent.infra.database import Database
 
 
+# NOTE: ``avg_edge`` reports magnitude (AVG of ABS), since edge_at_decision is
+# stored signed (p_up - mid). Direction is captured by the trade's side
+# (YES/NO); for performance reporting we want |edge| so NO-side trades aren't
+# misread as negative-EV. Decision-time gate at decider.py:154 also uses |edge|.
 STATS_QUERY_TOTAL = """
     SELECT
         COUNT(*)                                                   AS trades,
         COUNT(*) FILTER (WHERE pnl > 0)                            AS wins,
         COUNT(*) FILTER (WHERE pnl <= 0)                           AS losses,
-        COALESCE(AVG(edge_at_decision), 0)                         AS avg_edge,
+        COALESCE(AVG(ABS(edge_at_decision)), 0)                    AS avg_edge,
         COALESCE(SUM(pnl), 0)                                      AS total_pnl,
         COALESCE(AVG(pnl), 0)                                      AS avg_pnl,
         COALESCE(AVG(vol_at_decision), 0)                          AS avg_vol
@@ -30,7 +34,7 @@ STATS_QUERY_BY_DURATION = """
         COUNT(*)                                                   AS trades,
         COUNT(*) FILTER (WHERE t.pnl > 0)                          AS wins,
         COUNT(*) FILTER (WHERE t.pnl <= 0)                         AS losses,
-        COALESCE(AVG(t.edge_at_decision), 0)                       AS avg_edge,
+        COALESCE(AVG(ABS(t.edge_at_decision)), 0)                  AS avg_edge,
         COALESCE(SUM(t.pnl), 0)                                    AS total_pnl,
         COALESCE(AVG(t.pnl), 0)                                    AS avg_pnl
     FROM quant_short_trades t
@@ -47,7 +51,7 @@ STATS_QUERY_BY_ASSET = """
         COUNT(*)                                                   AS trades,
         COUNT(*) FILTER (WHERE t.pnl > 0)                          AS wins,
         COUNT(*) FILTER (WHERE t.pnl <= 0)                         AS losses,
-        COALESCE(AVG(t.edge_at_decision), 0)                       AS avg_edge,
+        COALESCE(AVG(ABS(t.edge_at_decision)), 0)                  AS avg_edge,
         COALESCE(SUM(t.pnl), 0)                                    AS total_pnl,
         COALESCE(AVG(t.pnl), 0)                                    AS avg_pnl
     FROM quant_short_trades t
@@ -75,11 +79,11 @@ def _render_breakdown(console: Console, rows, title: str, key_col: str, key_fmt)
     table.add_column("Trades", justify="right")
     table.add_column("W/L", justify="right")
     table.add_column("Win%", justify="right")
-    table.add_column("Avg Edge", justify="right")
+    table.add_column("Avg |Edge|", justify="right")
     table.add_column("Avg P&L", justify="right")
     table.add_column("Total P&L", justify="right")
     if not rows:
-        table.add_row("(none)", "0", "-", "-", "-", "-", "$0.00")
+        table.add_row("(none)", "0", "-", "-", "-", "-", "$0.0000")
     else:
         for r in rows:
             trades = int(r["trades"])
@@ -95,9 +99,9 @@ def _render_breakdown(console: Console, rows, title: str, key_col: str, key_fmt)
                 str(trades),
                 f"{wins}/{losses}",
                 f"{win_pct:.1f}%",
-                f"{avg_edge:+.3f}",
+                f"{avg_edge:.4f}",
                 f"${avg_pnl:+,.2f}",
-                f"[{pnl_style}]${total_pnl:+,.2f}[/{pnl_style}]",
+                f"[{pnl_style}]${total_pnl:+,.4f}[/{pnl_style}]",
             )
     console.print(table)
 
@@ -174,9 +178,9 @@ def quant_stats(asset: str | None, by_duration: bool, by_asset: bool) -> None:
         table.add_row("Trades", str(trades))
         table.add_row("W/L", f"{wins}/{losses}")
         table.add_row("Win%", f"{win_pct:.1f}%")
-        table.add_row("Avg Edge", f"{avg_edge:+.3f}")
+        table.add_row("Avg |Edge|", f"{avg_edge:.4f}")
         table.add_row("Avg P&L", f"${avg_pnl:+,.2f}")
-        table.add_row("Total P&L", f"[{pnl_style}]${total_pnl:+,.2f}[/{pnl_style}]")
+        table.add_row("Total P&L", f"[{pnl_style}]${total_pnl:+,.4f}[/{pnl_style}]")
         table.add_row("Avg Realized Vol", f"{avg_vol:.3f}")
 
         console.print(table)
