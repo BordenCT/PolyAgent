@@ -14,9 +14,10 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timezone
 from decimal import Decimal
-from typing import Protocol
+from typing import Callable, Optional, Protocol
 
 from polyagent.models import QuantShortTrade
+from polyagent.services.bankroll import BankrollState
 from polyagent.services.quant.assets.registry import apply_env_overrides, get
 from polyagent.services.quant.assets.sources.base import PriceSource
 from polyagent.services.quant.core.estimator import estimate_up_probability
@@ -52,7 +53,9 @@ class QuantDecider:
         book: Order-book fetcher returning ``(best_bid, best_ask)``.
         repo: Repository providing ``get_trades_for_market``, ``insert_trade``,
             and ``count_open_trades_for_asset``.
-        position_size_usd: Notional USD per paper trade.
+        position_size_usd: Maximum USD notional per paper trade. With
+            ``bankroll_provider`` set this is a *cap* on the Kelly-sized
+            position; without it, this is the literal fixed size used.
         max_trades_per_cycle: Hard cap on trades opened in a single
             scan-and-decide pass. Prevents the cascade where one Coinbase
             tick triggers identical signals on every active market in the
@@ -62,6 +65,24 @@ class QuantDecider:
             in the same orchestrator pass are 100%% correlated (same
             spot, same vol, same model output), so the cap also bounds
             correlated paper-bankroll exposure.
+        bankroll_provider: Optional callable returning the current unified
+            :class:`BankrollState`. When provided, the decider:
+
+            - Skips a candidate if ``state.free`` is below
+              ``min_free_bankroll``, logging ``reason=bankroll_floor``.
+            - Sizes the position via Kelly:
+              ``size = min(|edge| * kelly_max_fraction * state.free,
+                          position_size_usd, state.free - min_free_bankroll)``,
+              floored at $0.01.
+
+            When None, every accepted candidate gets the fixed
+            ``position_size_usd`` (legacy behavior, preserved for tests).
+        kelly_max_fraction: Kelly-fraction multiplier when sizing
+            against bankroll. 0.25 (quarter Kelly) is the standard
+            conservative paper default.
+        min_free_bankroll: Floor below which the decider refuses to
+            enter regardless of edge, mirroring the main bot's
+            ``MIN_FREE_BANKROLL`` gate.
     """
 
     def __init__(
@@ -73,6 +94,9 @@ class QuantDecider:
         max_trades_per_cycle: int = 5,
         max_open_per_asset: int = 3,
         settlements: dict[str, _SettlementSource] | None = None,
+        bankroll_provider: Optional[Callable[[], BankrollState]] = None,
+        kelly_max_fraction: float = 0.25,
+        min_free_bankroll: Decimal = Decimal("1.0"),
     ) -> None:
         self._sources = sources
         self._book = book
@@ -82,6 +106,9 @@ class QuantDecider:
         self._max_open_per_asset = max_open_per_asset
         self._opened_this_cycle = 0
         self._settlements: dict[str, _SettlementSource] = settlements or {}
+        self._bankroll_provider = bankroll_provider
+        self._kelly_max_fraction = float(kelly_max_fraction)
+        self._min_free_bankroll = Decimal(str(min_free_bankroll))
 
     def reset_cycle(self) -> None:
         """Reset the per-cycle trade counter. Call at the start of each scan."""
@@ -196,7 +223,16 @@ class QuantDecider:
                            mid=f"{mid:.4f}")
             return
 
-        size_fraction = float(self._size)
+        # Bankroll floor + Kelly sizing. Kept out of the early-gate block
+        # so that fee-of-edge checks don't run when bankroll has decided
+        # we can't afford anything anyway. Decoupled from the cap check
+        # because a tight bankroll is a stricter constraint than the
+        # simultaneous-trades cap.
+        size = self._compute_size(edge, slug)
+        if size is None:
+            return  # already logged
+
+        size_fraction = float(size)
         gross_edge_usd = abs(edge) * size_fraction
         fees_usd = size_fraction * spec.fee_bps / 10_000.0
         if gross_edge_usd <= fees_usd:
@@ -214,7 +250,7 @@ class QuantDecider:
             market_id=market_id,
             side=side,
             fill_price_assumed=fill,
-            size=self._size,
+            size=size,
             estimator_p_up=p_up,
             spot_at_decision=spot,
             vol_at_decision=vol,
@@ -223,9 +259,38 @@ class QuantDecider:
         self._repo.insert_trade(trade)
         self._opened_this_cycle += 1
         logger.info(
-            "PAPER %s side=%s edge=%+.4f p_up=%.4f mid=%.4f asset=%s",
-            slug, side, edge, p_up, mid, asset_id,
+            "PAPER %s side=%s edge=%+.4f p_up=%.4f mid=%.4f size=%.2f asset=%s",
+            slug, side, edge, p_up, mid, float(size), asset_id,
         )
+
+    def _compute_size(self, edge: float, slug: str) -> Decimal | None:
+        """Return the position size to insert, or None to skip.
+
+        Returns None and logs a SKIP when the bankroll provider says the
+        free balance is below the floor. Without a bankroll provider the
+        legacy fixed-size behavior is preserved (used by tests and as a
+        safe default if the wiring isn't set up).
+        """
+        if self._bankroll_provider is None:
+            return self._size
+        state = self._bankroll_provider()
+        free = state.free
+        if free < self._min_free_bankroll:
+            self._log_skip(slug, "bankroll_floor",
+                           free=f"{free:.2f}",
+                           floor=f"{self._min_free_bankroll:.2f}",
+                           open=f"{state.open_capital_total:.2f}")
+            return None
+        kelly_dollars = Decimal(str(abs(edge) * self._kelly_max_fraction)) * free
+        headroom = free - self._min_free_bankroll
+        size = min(kelly_dollars, self._size, headroom)
+        if size < Decimal("0.01"):
+            self._log_skip(slug, "bankroll_floor",
+                           free=f"{free:.2f}",
+                           kelly=f"{kelly_dollars:.4f}",
+                           note="size_under_one_cent")
+            return None
+        return size.quantize(Decimal("0.01"))
 
     @staticmethod
     def _log_skip(slug: str, reason: str, **fields) -> None:

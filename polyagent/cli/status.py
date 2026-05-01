@@ -8,9 +8,9 @@ import click
 from rich.console import Console
 from rich.table import Table
 
-from polyagent.data.repositories.positions import PositionRepository
 from polyagent.infra.config import Settings
 from polyagent.infra.database import Database
+from polyagent.services.bankroll import compute_bankroll_state
 
 
 @click.command()
@@ -34,21 +34,18 @@ def status(watch: bool):
                 cur.execute("SELECT COUNT(*) as cnt FROM thesis WHERE created_at > NOW() - INTERVAL '24 hours'")
                 recent_theses = cur.fetchone()["cnt"]
 
-                # Short-horizon quant subsystem (separate ledger; unifies in Phase 2).
                 cur.execute("""
                     SELECT
                         COUNT(*) FILTER (WHERE pnl IS NOT NULL) AS resolved,
-                        COALESCE(SUM(pnl), 0)                   AS total_pnl
+                        COUNT(*) FILTER (WHERE pnl IS NULL)     AS open
                     FROM quant_short_trades
                 """)
                 qs_row = cur.fetchone()
                 qs_resolved = int(qs_row["resolved"] or 0)
-                qs_pnl = Decimal(str(qs_row["total_pnl"] or 0))
+                qs_open = int(qs_row["open"] or 0)
 
-            position_repo = PositionRepository(db)
-            open_capital, realized_pnl = position_repo.get_capital_state()
-            starting = Decimal(str(settings.bankroll))
-            free_bankroll = starting + realized_pnl - open_capital
+            # Unified bankroll across both ledgers.
+            bk = compute_bankroll_state(db, settings.bankroll)
             db.close()
 
             table = Table(title="PolyAgent Status")
@@ -61,18 +58,23 @@ def status(watch: bool):
             table.add_row("Markets Evaluating", str(market_counts.get("evaluating", 0)))
             table.add_row("Markets Traded", str(market_counts.get("traded", 0)))
             table.add_row("Markets Rejected", str(market_counts.get("rejected", 0)))
-            table.add_row("Open Positions", str(open_positions))
+            table.add_row("Open Positions (main)", str(open_positions))
+            table.add_row("Open Positions (short)", str(qs_open))
             table.add_row("Theses (24h)", str(recent_theses))
-            table.add_row("Starting Bankroll", f"${float(starting):,.2f}")
-            table.add_row("Realized P&L", _colorize_pnl(realized_pnl))
-            table.add_row("Open Capital", f"${float(open_capital):,.2f}")
+            table.add_row("Starting Bankroll", f"${float(bk.starting):,.2f}")
+            table.add_row("Realized P&L (main)", _colorize_pnl(bk.realized_main))
+            table.add_row("Realized P&L (short)", _colorize_pnl(bk.realized_quant))
+            table.add_row("Realized P&L (total)", _colorize_pnl(bk.realized_total))
+            table.add_row("Open Capital (main)", f"${float(bk.open_capital_main):,.2f}")
+            table.add_row("Open Capital (short)", f"${float(bk.open_capital_quant):,.2f}")
+            table.add_row("Open Capital (total)", f"${float(bk.open_capital_total):,.2f}")
             table.add_row(
-                "Free Bankroll",
-                _free_bankroll_display(free_bankroll, settings.min_free_bankroll),
+                "Free Bankroll (unified)",
+                _free_bankroll_display(bk.free, settings.min_free_bankroll),
             )
             table.add_row(
-                "Quant Short (paper)",
-                f"{qs_resolved} resolved, {_colorize_pnl(qs_pnl)}",
+                "Quant Short Resolved",
+                str(qs_resolved),
             )
 
             console.clear()

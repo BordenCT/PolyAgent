@@ -23,6 +23,7 @@ from polyagent.infra.logging import setup_logging
 from polyagent.infra.pool import WorkerPool
 from polyagent.infra.queues import Queues, ScanResult, ThesisResult
 from polyagent.models import MarketStatus
+from polyagent.services.bankroll import compute_bankroll_state
 from polyagent.services.brain import BrainService
 from polyagent.services.classifier import classify
 from polyagent.services.embeddings import EmbeddingsService
@@ -271,8 +272,14 @@ def run() -> None:
                         )
                     votes.append(vote)
 
-                open_capital, realized_pnl = position_repo.get_capital_state()
-                free_bankroll = float(Decimal(str(settings.bankroll)) + realized_pnl - open_capital)
+                # Unified across `positions` (main) and `quant_short_trades`
+                # (short-horizon paper). Both subsystems draw from the same
+                # paper bankroll, so the floor and Kelly sizing should see
+                # the same number.
+                bk_state = compute_bankroll_state(db, settings.bankroll)
+                open_capital = bk_state.open_capital_total
+                realized_pnl = bk_state.realized_total
+                free_bankroll = float(bk_state.free)
                 if free_bankroll < settings.min_free_bankroll:
                     logger.info(
                         "SKIP %s — free bankroll $%.2f below $%.2f floor (open=$%.2f, pnl=$%.2f)",
@@ -416,6 +423,13 @@ def run() -> None:
             max_trades_per_cycle=settings.quant_max_trades_per_cycle,
             max_open_per_asset=settings.quant_max_open_per_asset,
             settlements=quant_settlements,
+            # Both bots draw from the same paper bankroll. Decider gates
+            # against state.free below min_free_bankroll, and Kelly-sizes
+            # each entry from state.free so total exposure compounds down
+            # naturally as positions stack up.
+            bankroll_provider=lambda: compute_bankroll_state(db, settings.bankroll),
+            kelly_max_fraction=settings.kelly_max_fraction,
+            min_free_bankroll=Decimal(str(settings.min_free_bankroll)),
         )
         quant_resolver = QuantResolver(
             repo=quant_short_repo,

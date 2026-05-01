@@ -4,7 +4,18 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
+from polyagent.services.bankroll import BankrollState
 from polyagent.services.quant.short_horizon.decider import QuantDecider
+
+
+def _bankroll(starting="20", realized="0", open_main="0", open_quant="0"):
+    return BankrollState(
+        starting=Decimal(str(starting)),
+        realized_main=Decimal(str(realized)),
+        realized_quant=Decimal("0"),
+        open_capital_main=Decimal(str(open_main)),
+        open_capital_quant=Decimal(str(open_quant)),
+    )
 
 
 class _FakeRepo:
@@ -423,3 +434,87 @@ class TestSkipLogging:
         assert tokens[0] == "SKIP"
         assert tokens[1] == "btc-updown-5m-Z"
         assert tokens[2].startswith("reason=")
+
+
+class TestBankrollIntegration:
+    """Bankroll provider gates entries below floor and Kelly-sizes above it."""
+
+    def _decider_with_bankroll(self, repo, free, *, kelly_max_fraction=0.25,
+                               max_size="5", min_floor="1.0"):
+        # provider closure returns whatever BankrollState we wire in
+        bk = BankrollState(
+            starting=Decimal("20"),
+            realized_main=Decimal("0"),
+            realized_quant=Decimal("0"),
+            open_capital_main=Decimal("0"),
+            open_capital_quant=Decimal("20") - Decimal(str(free)),
+        )
+        return QuantDecider(
+            sources={"BTC": _FakeSrc(Decimal("60000"))},
+            book=_FakeBook((Decimal("0.30"), Decimal("0.32"))),
+            repo=repo,
+            position_size_usd=Decimal(str(max_size)),
+            settlements={"BTC": _FakeSettlement(Decimal("59000"))},
+            bankroll_provider=lambda: bk,
+            kelly_max_fraction=kelly_max_fraction,
+            min_free_bankroll=Decimal(str(min_floor)),
+        )
+
+    def test_floor_skip_when_free_below_min(self, caplog):
+        repo = _FakeRepo()
+        d = self._decider_with_bankroll(repo, free="0.50", min_floor="1.0")
+        row = _row()
+        row["slug"] = "btc-updown-5m-floor"
+        with caplog.at_level("INFO", logger="polyagent.services.quant.short_horizon.decider"):
+            d.evaluate(row)
+        assert repo.inserted == []
+        msg = next(r.message for r in caplog.records if "SKIP" in r.message and "bankroll_floor" in r.message)
+        assert "reason=bankroll_floor" in msg
+        assert "free=0.50" in msg
+        assert "floor=1.00" in msg
+
+    def test_kelly_sizes_below_max_when_bankroll_tight(self):
+        # spot=60000 vs start_spot=59000: p_up ≈ 1.0, mid = 0.31, so
+        # edge ≈ 0.69. raw_kelly = 0.69 × 0.25 × 4.00 = 0.69. Cap=5,
+        # headroom = 4 - 1 = 3. min(0.69, 5, 3) = 0.69.
+        repo = _FakeRepo()
+        d = self._decider_with_bankroll(repo, free="4.00", max_size="5",
+                                        kelly_max_fraction=0.25)
+        d.evaluate(_row())
+        assert len(repo.inserted) == 1
+        assert repo.inserted[0].size == Decimal("0.69")
+
+    def test_kelly_size_caps_at_position_size_when_bankroll_large(self):
+        repo = _FakeRepo()
+        d = self._decider_with_bankroll(repo, free="200", max_size="5",
+                                        kelly_max_fraction=0.25)
+        d.evaluate(_row())
+        assert len(repo.inserted) == 1
+        # raw = |edge| × 0.25 × 200 = 50; capped at 5.
+        assert repo.inserted[0].size == Decimal("5")
+
+    def test_kelly_respects_headroom(self):
+        # Free = $1.50, floor = $1.00. Headroom = 0.50. With a max-Kelly
+        # setting of 1.0 the raw Kelly = 0.69 × 1.0 × 1.50 = 1.035, which
+        # exceeds both the per-trade cap (5) and the headroom (0.50). The
+        # min is the headroom.
+        repo = _FakeRepo()
+        d = self._decider_with_bankroll(repo, free="1.50", max_size="5",
+                                        min_floor="1.0", kelly_max_fraction=1.0)
+        d.evaluate(_row())
+        assert len(repo.inserted) == 1
+        assert repo.inserted[0].size == Decimal("0.50")
+
+    def test_no_bankroll_provider_keeps_legacy_fixed_size(self):
+        """Backward-compat: tests and non-wired call sites still get a
+        fixed position_size_usd inserted, no Kelly scaling, no floor."""
+        repo = _FakeRepo()
+        d = QuantDecider(
+            sources={"BTC": _FakeSrc(Decimal("60000"))},
+            book=_FakeBook((Decimal("0.30"), Decimal("0.32"))),
+            repo=repo,
+            position_size_usd=Decimal("5"),
+        )
+        d.evaluate(_row())
+        assert len(repo.inserted) == 1
+        assert repo.inserted[0].size == Decimal("5")
