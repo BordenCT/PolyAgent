@@ -97,6 +97,7 @@ class QuantDecider:
         - per-asset open-position cap reached,
         - no live price source for ``asset_id`` or no current spot,
         - window already closed,
+        - window has not opened yet (Polymarket lists hours in advance),
         - no book mid available,
         - absolute edge below ``spec.edge_threshold``,
         - gross edge does not exceed assumed fees.
@@ -148,11 +149,22 @@ class QuantDecider:
             self._log_skip(slug, "no_spot", asset=asset_id)
             return
 
+        window_start = market_row["window_start_ts"]
         window_end = market_row["window_end_ts"]
         now = datetime.now(timezone.utc)
         ttm = (window_end - now).total_seconds()
         if ttm <= 0:
             self._log_skip(slug, "window_closed", ttm=f"{ttm:.0f}")
+            return
+        # Polymarket lists short-horizon markets hours before their windows
+        # open. Without this guard the decider would enter on a market with
+        # no signal yet (start_spot fetched from a future timestamp returns
+        # garbage or None) and the trade would sit in the cap for the full
+        # listing-to-resolution span (often 9+ hours), starving live windows.
+        secs_until_open = (window_start - now).total_seconds()
+        if secs_until_open > 0:
+            self._log_skip(slug, "window_not_open",
+                           minutes_until_open=f"{secs_until_open / 60:.1f}")
             return
 
         start_spot_raw = market_row.get("start_spot")

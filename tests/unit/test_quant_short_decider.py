@@ -350,6 +350,40 @@ class TestSkipLogging:
         msg = next(r.message for r in caplog.records if "SKIP" in r.message)
         assert "reason=window_closed" in msg
 
+    def test_window_not_open_logged_and_skipped(self, caplog):
+        """Polymarket lists short-horizon markets hours before they open.
+        Entering on those holds a slot for the full listing-to-resolution
+        span (often 9+ hours), which is what was starving the cap."""
+        repo = _FakeRepo()
+        d = self._decider(repo)
+        row = self._row_with_slug("btc-updown-5m-future")
+        # Window opens in 9 hours, closes 9h5m from now.
+        row["window_start_ts"] = datetime.now(timezone.utc) + timedelta(hours=9)
+        row["window_end_ts"] = datetime.now(timezone.utc) + timedelta(hours=9, minutes=5)
+        with caplog.at_level("INFO", logger="polyagent.services.quant.short_horizon.decider"):
+            d.evaluate(row)
+        # Skipped before the trade is inserted.
+        assert repo.inserted == []
+        msg = next(r.message for r in caplog.records if "SKIP" in r.message)
+        assert "reason=window_not_open" in msg
+        assert "minutes_until_open=" in msg
+
+    def test_window_actively_open_proceeds_past_check(self, caplog):
+        """Sanity: if the window is currently open, this gate doesn't fire."""
+        repo = _FakeRepo()
+        # Edge will clear (high p_up vs low mid).
+        sources = {"BTC": _FakeSrc(Decimal("60000"))}
+        book = _FakeBook((Decimal("0.30"), Decimal("0.32")))
+        d = self._decider(repo, sources=sources, book=book)
+        row = self._row_with_slug("btc-updown-5m-now")
+        row["window_start_ts"] = datetime.now(timezone.utc) - timedelta(minutes=2)
+        row["window_end_ts"] = datetime.now(timezone.utc) + timedelta(minutes=3)
+        with caplog.at_level("INFO", logger="polyagent.services.quant.short_horizon.decider"):
+            d.evaluate(row)
+        # Trade went through (no window_not_open SKIP).
+        assert len(repo.inserted) == 1
+        assert not any("window_not_open" in r.message for r in caplog.records)
+
     def test_no_book_logged(self, caplog):
         class _NoBook:
             def fetch_mid(self, _): return None
