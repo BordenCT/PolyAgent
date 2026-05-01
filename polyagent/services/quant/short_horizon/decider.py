@@ -114,6 +114,11 @@ class QuantDecider:
         """Reset the per-cycle trade counter. Call at the start of each scan."""
         self._opened_this_cycle = 0
 
+    @property
+    def opened_this_cycle(self) -> int:
+        """Number of trades inserted since the last ``reset_cycle()``."""
+        return self._opened_this_cycle
+
     def evaluate(self, market_row: dict) -> None:
         """Evaluate one market row and persist a paper trade if it clears gates.
 

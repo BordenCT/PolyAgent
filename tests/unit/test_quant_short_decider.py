@@ -177,6 +177,21 @@ def test_decider_caps_trades_per_cycle():
     assert len(repo.inserted) == 2
 
 
+def test_opened_this_cycle_reports_inserts_since_reset():
+    """The orchestrator reads this to log how many trades the cycle just
+    placed. Must reflect inserts since the most recent reset_cycle()."""
+    repo = _FakeRepo()
+    sources = {"BTC": _FakeSrc(Decimal("60000"))}
+    book = _FakeBook((Decimal("0.30"), Decimal("0.32")))
+    d = QuantDecider(sources=sources, book=book, repo=repo, position_size_usd=Decimal("5"))
+
+    assert d.opened_this_cycle == 0
+    d.evaluate(_row())
+    assert d.opened_this_cycle == 1
+    d.reset_cycle()
+    assert d.opened_this_cycle == 0
+
+
 def test_reset_cycle_clears_per_cycle_counter():
     repo = _FakeRepo()
     sources = {"BTC": _FakeSrc(Decimal("60000"))}

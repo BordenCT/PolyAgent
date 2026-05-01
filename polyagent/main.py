@@ -440,22 +440,38 @@ def run() -> None:
         def quant_scan_and_decide() -> None:
             if not settings.quant_short_enabled:
                 return
+            cycle_start = time.time()
+            logger.info("quant cycle: start")
+            scanned = 0
             try:
                 for m in quant_short_scanner.scan():
                     quant_short_repo.upsert_market(m)
+                    scanned += 1
             except Exception:
                 logger.exception("quant scan failed")
+            logger.info("quant cycle: scan done scanned=%d", scanned)
+            active_count = 0
             try:
                 quant_decider.reset_cycle()
                 active = quant_short_repo.get_active_markets(datetime.now(timezone.utc))
+                active_count = len(active)
                 for row in active:
                     quant_decider.evaluate(row)
             except Exception:
                 logger.exception("quant decider failed")
+            logger.info(
+                "quant cycle: decide done active=%d entered=%d",
+                active_count, quant_decider.opened_this_cycle,
+            )
+            resolved = 0
             try:
-                quant_resolver.resolve_due_markets()
+                resolved = quant_resolver.resolve_due_markets() or 0
             except Exception:
                 logger.exception("quant resolver failed")
+            logger.info(
+                "quant cycle: complete resolved=%d elapsed_s=%.2f",
+                resolved, time.time() - cycle_start,
+            )
 
         pool.spawn(
             "quant_orchestrator",
