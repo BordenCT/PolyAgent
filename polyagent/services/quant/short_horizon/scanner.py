@@ -142,7 +142,7 @@ class QuantShortScanner:
         page_limit: Number of markets requested per Gamma page.
     """
 
-    def __init__(self, http_client=None, page_limit: int = 500) -> None:
+    def __init__(self, http_client=None, page_limit: int = 1000) -> None:
         self._http = http_client or httpx.Client(timeout=15.0)
         self._page_limit = page_limit
 
@@ -159,11 +159,16 @@ class QuantShortScanner:
                     "active": "true",
                     "closed": "false",
                     "limit": self._page_limit,
-                    # Newest-first so the rapidly-rotating 5m/15m markets land at
-                    # the top of the response and aren't pushed out of the
-                    # page_limit window by older long-horizon markets.
-                    "order": "startDate",
-                    "ascending": "false",
+                    # Soonest-resolving first. Polymarket lists 5m/15m
+                    # markets up to 24+ hours in advance, and a previous
+                    # newest-startDate sort filled the page entirely with
+                    # tomorrow's batch, pushing currently-active short-
+                    # horizon markets off the limit. Sorting by endDate
+                    # ascending puts markets ending soonest at the top
+                    # of the page, which is exactly the population the
+                    # decider can act on right now.
+                    "order": "endDate",
+                    "ascending": "true",
                 },
             )
             if resp.status_code != 200:

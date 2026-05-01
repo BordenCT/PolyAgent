@@ -217,10 +217,13 @@ def test_scanner_accepts_yes_no_labels():
     assert out[0].token_id_no == "no_id"
 
 
-def test_scanner_requests_newest_first():
-    """Regression: gamma's default ordering pushes rapidly-rotating 5m
-    markets out of the page_limit window. We must request startDate desc."""
+def test_scanner_requests_soonest_resolving_first():
+    """Regression: with newest-startDate sort, Polymarket's batch of
+    24h-ahead future-listed 5m markets dominates the 500-row page and
+    pushes currently-active markets off the response. Sort by endDate
+    ascending so soonest-resolving markets — including current-window
+    5m and 15m — land at the top of the response."""
     http = _FakeHttp([])
     QuantShortScanner(http_client=http).scan()
-    assert http.last_params["order"] == "startDate"
-    assert http.last_params["ascending"] == "false"
+    assert http.last_params["order"] == "endDate"
+    assert http.last_params["ascending"] == "true"
