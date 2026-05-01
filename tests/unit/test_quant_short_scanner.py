@@ -217,13 +217,17 @@ def test_scanner_accepts_yes_no_labels():
     assert out[0].token_id_no == "no_id"
 
 
-def test_scanner_requests_soonest_resolving_first():
-    """Regression: with newest-startDate sort, Polymarket's batch of
-    24h-ahead future-listed 5m markets dominates the 500-row page and
-    pushes currently-active markets off the response. Sort by endDate
-    ascending so soonest-resolving markets — including current-window
-    5m and 15m — land at the top of the response."""
+def test_scanner_requests_soonest_resolving_first_excluding_zombies():
+    """Regression: Polymarket's gamma response includes thousands of
+    months-old short-horizon markets stuck at active=true closed=false.
+    Without server-side filtering on `end_date_min` and a sort by
+    endDate ascending, the page is dominated by zombies and currently-
+    active markets get pushed past the limit. Lock both knobs."""
     http = _FakeHttp([])
     QuantShortScanner(http_client=http).scan()
     assert http.last_params["order"] == "endDate"
     assert http.last_params["ascending"] == "true"
+    # end_date_min should be a parseable ISO timestamp roughly equal to now.
+    iso = http.last_params["end_date_min"]
+    assert "T" in iso  # date+time
+    assert iso.endswith("+00:00") or iso.endswith("Z")  # UTC

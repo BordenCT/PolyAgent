@@ -159,14 +159,15 @@ class QuantShortScanner:
                     "active": "true",
                     "closed": "false",
                     "limit": self._page_limit,
-                    # Soonest-resolving first. Polymarket lists 5m/15m
-                    # markets up to 24+ hours in advance, and a previous
-                    # newest-startDate sort filled the page entirely with
-                    # tomorrow's batch, pushing currently-active short-
-                    # horizon markets off the limit. Sorting by endDate
-                    # ascending puts markets ending soonest at the top
-                    # of the page, which is exactly the population the
-                    # decider can act on right now.
+                    # `end_date_min=<now>` filters out zombie markets:
+                    # Polymarket has thousands of months-old short-horizon
+                    # markets stuck at active=true, closed=false. Without
+                    # this filter the page is dominated by them and our
+                    # local "window already closed" filter rejects every
+                    # row, leaving the decider with zero candidates.
+                    "end_date_min": datetime.now(timezone.utc).isoformat(),
+                    # Soonest-resolving first puts currently-active 5m and
+                    # 15m markets at the top of the page.
                     "order": "endDate",
                     "ascending": "true",
                 },
