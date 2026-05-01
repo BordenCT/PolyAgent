@@ -8,17 +8,28 @@ from rich.table import Table
 from polyagent.infra.config import Settings
 from polyagent.infra.database import Database
 
-TABLES_TO_WIPE = ("trade_log", "positions", "thesis", "markets")
+# Order doesn't matter (TRUNCATE ... CASCADE handles FK refs), but trades
+# are listed before their parent markets for readability.
+TABLES_TO_WIPE = (
+    "trade_log",
+    "positions",
+    "thesis",
+    "markets",
+    "quant_short_trades",
+    "quant_short_markets",
+)
 TABLES_TO_PRESERVE = ("historical_outcomes", "target_wallets")
 
 
 @click.command()
 @click.option("--yes", "-y", is_flag=True, help="Skip the confirmation prompt")
 def reset(yes: bool):
-    """Wipe paper trading state (markets/thesis/positions/trade_log) and restart fresh.
+    """Wipe paper trading state across both ledgers and restart fresh.
 
-    Preserves historical_outcomes and target_wallets so learned priors and
-    seed data survive. Uses DATABASE_URL from .env.
+    Wipes: markets, thesis, positions, trade_log (main bot), and
+    quant_short_markets, quant_short_trades (short-horizon paper).
+    Preserves historical_outcomes and target_wallets so learned priors
+    and seed data survive. Uses DATABASE_URL from .env.
     """
     console = Console()
     settings = Settings.from_env()
