@@ -21,7 +21,10 @@ STATS_QUERY_TOTAL = """
         COALESCE(AVG(abs_edge), 0)          AS avg_edge,
         COALESCE(SUM(pnl), 0)               AS total_pnl,
         COALESCE(AVG(pnl), 0)               AS avg_pnl,
-        COALESCE(AVG(vol_at_decision), 0)   AS avg_vol
+        COALESCE(AVG(vol_at_decision), 0)   AS avg_vol,
+        COALESCE(SUM(size), 0)              AS total_staked,
+        COALESCE(AVG(size), 0)              AS avg_size,
+        COALESCE(AVG(size / NULLIF(fill_price_assumed, 0)), 0) AS avg_contracts
     FROM quant_short_v
     WHERE pnl IS NOT NULL
       AND (%(asset)s::text IS NULL OR asset_id = %(asset)s)
@@ -156,6 +159,10 @@ def quant_stats(asset: str | None, by_duration: bool, by_asset: bool) -> None:
         total_pnl = float(row["total_pnl"] or 0)
         avg_pnl = float(row["avg_pnl"] or 0)
         avg_vol = float(row["avg_vol"] or 0)
+        total_staked = float(row["total_staked"] or 0)
+        avg_size = float(row["avg_size"] or 0)
+        avg_contracts = float(row["avg_contracts"] or 0)
+        roi = (total_pnl / total_staked * 100) if total_staked > 0 else 0
 
         title = (
             f"Quant Up/Down Paper-Trading Performance ({asset})"
@@ -176,8 +183,12 @@ def quant_stats(asset: str | None, by_duration: bool, by_asset: bool) -> None:
         table.add_row("W/L", f"{wins}/{losses}")
         table.add_row("Win%", f"{win_pct:.1f}%")
         table.add_row("Avg |Edge|", f"{avg_edge:.4f}")
+        table.add_row("Total Staked", f"${total_staked:,.2f}")
+        table.add_row("Avg Size", f"${avg_size:.2f}")
+        table.add_row("Avg Contracts", f"{avg_contracts:.2f}")
         table.add_row("Avg P&L", f"${avg_pnl:+,.2f}")
         table.add_row("Total P&L", f"[{pnl_style}]${total_pnl:+,.2f}[/{pnl_style}]")
+        table.add_row("ROI", f"{roi:+.2f}%")
         table.add_row("Avg Realized Vol", f"{avg_vol:.3f}")
 
         console.print(table)
