@@ -36,13 +36,17 @@ def status(watch: bool):
 
                 cur.execute("""
                     SELECT
-                        COUNT(*) FILTER (WHERE pnl IS NOT NULL) AS resolved,
-                        COUNT(*) FILTER (WHERE pnl IS NULL)     AS open
+                        COUNT(*) FILTER (WHERE pnl IS NOT NULL)            AS resolved,
+                        COUNT(*) FILTER (WHERE pnl IS NULL)                AS open,
+                        COALESCE(AVG(size) FILTER (WHERE pnl IS NULL), 0)  AS avg_open_size,
+                        COALESCE(AVG(size) FILTER (WHERE pnl IS NOT NULL), 0) AS avg_resolved_size
                     FROM quant_short_trades
                 """)
                 qs_row = cur.fetchone()
                 qs_resolved = int(qs_row["resolved"] or 0)
                 qs_open = int(qs_row["open"] or 0)
+                qs_avg_open = Decimal(str(qs_row["avg_open_size"] or 0))
+                qs_avg_resolved = Decimal(str(qs_row["avg_resolved_size"] or 0))
 
             # Unified bankroll across both ledgers.
             bk = compute_bankroll_state(db, settings.bankroll)
@@ -71,6 +75,14 @@ def status(watch: bool):
             table.add_row(
                 "Free Bankroll (unified)",
                 _free_bankroll_display(bk.free, settings.min_free_bankroll),
+            )
+            table.add_row(
+                "Avg Open Bet (short)",
+                f"${float(qs_avg_open):.2f}" if qs_open else "-",
+            )
+            table.add_row(
+                "Avg Resolved Bet (short)",
+                f"${float(qs_avg_resolved):.2f}" if qs_resolved else "-",
             )
             table.add_row(
                 "Quant Short Resolved",
