@@ -61,7 +61,7 @@ def perf(daily: bool, by_strategy: bool, by_category: bool):
 
     table = Table(title="PolyAgent Performance")
     table.add_column("Metric", style="cyan")
-    table.add_column("Value", style="green")
+    table.add_column("Value")
 
     pnl_style = "green" if total_pnl >= 0 else "red"
     main_style = "green" if main_pnl >= 0 else "red"

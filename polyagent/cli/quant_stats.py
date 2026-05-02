@@ -38,7 +38,9 @@ STATS_QUERY_BY_DURATION = """
         COUNT(*) FILTER (WHERE NOT won)     AS losses,
         COALESCE(AVG(abs_edge), 0)          AS avg_edge,
         COALESCE(SUM(pnl), 0)               AS total_pnl,
-        COALESCE(AVG(pnl), 0)               AS avg_pnl
+        COALESCE(AVG(pnl), 0)               AS avg_pnl,
+        COALESCE(SUM(size), 0)              AS total_staked,
+        COALESCE(AVG(size / NULLIF(fill_price_assumed, 0)), 0) AS avg_contracts
     FROM quant_short_v
     WHERE pnl IS NOT NULL
       AND (%(asset)s::text IS NULL OR asset_id = %(asset)s)
@@ -54,7 +56,9 @@ STATS_QUERY_BY_ASSET = """
         COUNT(*) FILTER (WHERE NOT won)     AS losses,
         COALESCE(AVG(abs_edge), 0)          AS avg_edge,
         COALESCE(SUM(pnl), 0)               AS total_pnl,
-        COALESCE(AVG(pnl), 0)               AS avg_pnl
+        COALESCE(AVG(pnl), 0)               AS avg_pnl,
+        COALESCE(SUM(size), 0)              AS total_staked,
+        COALESCE(AVG(size / NULLIF(fill_price_assumed, 0)), 0) AS avg_contracts
     FROM quant_short_v
     WHERE pnl IS NOT NULL
     GROUP BY asset_id
@@ -80,10 +84,13 @@ def _render_breakdown(console: Console, rows, title: str, key_col: str, key_fmt)
     table.add_column("W/L", justify="right")
     table.add_column("Win%", justify="right")
     table.add_column("Avg |Edge|", justify="right")
+    table.add_column("Staked", justify="right")
+    table.add_column("Avg Ctrs", justify="right", style="dim")
     table.add_column("Avg P&L", justify="right")
     table.add_column("Total P&L", justify="right")
+    table.add_column("ROI", justify="right")
     if not rows:
-        table.add_row("(none)", "0", "-", "-", "-", "-", "$0.00")
+        table.add_row("(none)", "0", "-", "-", "-", "-", "-", "-", "$0.00", "-")
     else:
         for r in rows:
             trades = int(r["trades"])
@@ -93,15 +100,23 @@ def _render_breakdown(console: Console, rows, title: str, key_col: str, key_fmt)
             total_pnl = float(r["total_pnl"])
             avg_pnl = float(r["avg_pnl"])
             avg_edge = float(r["avg_edge"])
+            total_staked = float(r["total_staked"])
+            avg_contracts = float(r["avg_contracts"])
+            roi = (total_pnl / total_staked * 100) if total_staked > 0 else 0.0
             pnl_style = "green" if total_pnl >= 0 else "red"
+            roi_style = "green" if roi >= 0 else "red"
+            avg_pnl_style = "green" if avg_pnl >= 0 else "red"
             table.add_row(
                 key_fmt(r),
                 str(trades),
                 f"{wins}/{losses}",
                 f"{win_pct:.1f}%",
                 f"{avg_edge:.4f}",
-                f"${avg_pnl:+,.2f}",
+                f"${total_staked:,.2f}",
+                f"{avg_contracts:.2f}",
+                f"[{avg_pnl_style}]${avg_pnl:+,.2f}[/{avg_pnl_style}]",
                 f"[{pnl_style}]${total_pnl:+,.2f}[/{pnl_style}]",
+                f"[{roi_style}]{roi:+.1f}%[/{roi_style}]",
             )
     console.print(table)
 
