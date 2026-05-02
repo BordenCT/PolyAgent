@@ -43,11 +43,13 @@ class ExecutorService:
         bankroll: float = 800.0,
         paper_trade: bool = True,
         min_free_bankroll: float = 0.0,
+        min_order_size: float = 0.0,
     ) -> None:
         self._kelly_max_fraction = kelly_max_fraction
         self._bankroll = bankroll
         self._paper_trade = paper_trade
         self._min_free_bankroll = min_free_bankroll
+        self._min_order_size = min_order_size
 
     def kelly_size(
         self,
@@ -148,6 +150,20 @@ class ExecutorService:
         if position_size <= 0:
             logger.info("SKIP — Kelly says no edge for market %s", thesis.market_id)
             return None
+
+        if position_size < self._min_order_size:
+            if headroom >= self._min_order_size:
+                logger.info(
+                    "BUMP %s — Kelly=$%.2f below min=$%.2f, bumping (headroom=$%.2f)",
+                    thesis.market_id, position_size, self._min_order_size, headroom,
+                )
+                position_size = self._min_order_size
+            else:
+                logger.info(
+                    "SKIP %s — Kelly=$%.2f below min=$%.2f, headroom=$%.2f insufficient",
+                    thesis.market_id, position_size, self._min_order_size, headroom,
+                )
+                return None
 
         # Target price tracked in YES coordinates so exit_monitor and status work uniformly.
         # For SELL, the expected move is negative (YES price should fall toward estimate).

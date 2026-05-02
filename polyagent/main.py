@@ -156,6 +156,7 @@ def run() -> None:
         bankroll=settings.bankroll,
         paper_trade=settings.paper_trade,
         min_free_bankroll=settings.min_free_bankroll,
+        min_order_size=settings.min_order_size,
     )
     exit_monitor = ExitMonitorService(
         target_pct=settings.exit_target_pct,
