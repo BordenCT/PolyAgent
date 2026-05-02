@@ -97,6 +97,7 @@ class QuantDecider:
         bankroll_provider: Optional[Callable[[], BankrollState]] = None,
         kelly_max_fraction: float = 0.25,
         min_free_bankroll: Decimal = Decimal("1.0"),
+        min_order_size: Decimal = Decimal("0.0"),
     ) -> None:
         self._sources = sources
         self._book = book
@@ -109,6 +110,7 @@ class QuantDecider:
         self._bankroll_provider = bankroll_provider
         self._kelly_max_fraction = float(kelly_max_fraction)
         self._min_free_bankroll = Decimal(str(min_free_bankroll))
+        self._min_order_size = Decimal(str(min_order_size))
 
     def reset_cycle(self) -> None:
         """Reset the per-cycle trade counter. Call at the start of each scan."""
@@ -263,9 +265,10 @@ class QuantDecider:
         )
         self._repo.insert_trade(trade)
         self._opened_this_cycle += 1
+        contracts = float(size) / float(fill) if float(fill) > 0 else 0.0
         logger.info(
-            "PAPER %s side=%s edge=%+.4f p_up=%.4f mid=%.4f size=%.2f asset=%s",
-            slug, side, edge, p_up, mid, float(size), asset_id,
+            "PAPER %s side=%s edge=%+.4f p_up=%.4f mid=%.4f size=$%.2f contracts=%.2f asset=%s",
+            slug, side, edge, p_up, mid, float(size), contracts, asset_id,
         )
 
     def _compute_size(self, edge: float, slug: str) -> Decimal | None:
@@ -295,6 +298,19 @@ class QuantDecider:
                            kelly=f"{kelly_dollars:.4f}",
                            note="size_under_one_cent")
             return None
+        if self._min_order_size > Decimal("0") and size < self._min_order_size:
+            if headroom >= self._min_order_size:
+                logger.info(
+                    "BUMP %s — Kelly=$%.2f below min=$%.2f, bumping (headroom=$%.2f)",
+                    slug, size, self._min_order_size, headroom,
+                )
+                size = self._min_order_size
+            else:
+                self._log_skip(slug, "min_order_size",
+                               kelly=f"{size:.2f}",
+                               min=f"{self._min_order_size:.2f}",
+                               headroom=f"{headroom:.2f}")
+                return None
         return size.quantize(Decimal("0.01"))
 
     @staticmethod

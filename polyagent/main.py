@@ -432,6 +432,7 @@ def run() -> None:
             bankroll_provider=lambda: compute_bankroll_state(db, settings.bankroll),
             kelly_max_fraction=settings.kelly_max_fraction,
             min_free_bankroll=Decimal(str(settings.min_free_bankroll)),
+            min_order_size=Decimal(str(settings.min_order_size)),
         )
         quant_resolver = QuantResolver(
             repo=quant_short_repo,
