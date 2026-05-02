@@ -155,6 +155,7 @@ def run() -> None:
         kelly_max_fraction=settings.kelly_max_fraction,
         bankroll=settings.bankroll,
         paper_trade=settings.paper_trade,
+        min_free_bankroll=settings.min_free_bankroll,
     )
     exit_monitor = ExitMonitorService(
         target_pct=settings.exit_target_pct,

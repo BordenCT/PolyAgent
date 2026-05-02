@@ -42,10 +42,12 @@ class ExecutorService:
         kelly_max_fraction: float = 0.25,
         bankroll: float = 800.0,
         paper_trade: bool = True,
+        min_free_bankroll: float = 0.0,
     ) -> None:
         self._kelly_max_fraction = kelly_max_fraction
         self._bankroll = bankroll
         self._paper_trade = paper_trade
+        self._min_free_bankroll = min_free_bankroll
 
     def kelly_size(
         self,
@@ -138,7 +140,10 @@ class ExecutorService:
             market_price=bet_price,
             bankroll=current_bankroll,
         )
-        position_size = round(kelly_amount * fraction, 2)
+        raw_size = kelly_amount * fraction
+        effective_bankroll = current_bankroll if current_bankroll is not None else self._bankroll
+        headroom = effective_bankroll - self._min_free_bankroll
+        position_size = round(min(raw_size, headroom), 2)
 
         if position_size <= 0:
             logger.info("SKIP — Kelly says no edge for market %s", thesis.market_id)
