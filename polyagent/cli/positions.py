@@ -114,6 +114,7 @@ def positions(closed: bool, worst: bool, limit: int, all_rows: bool, as_json: bo
     table.add_column("Entry", justify="right")
     table.add_column("Current", justify="right")
     table.add_column("Size", justify="right")
+    table.add_column("Kelly%", justify="right", style="dim")
     table.add_column("P&L", justify="right")
     if closed or worst:
         table.add_column("Exit", style="yellow")
@@ -129,6 +130,7 @@ def positions(closed: bool, worst: bool, limit: int, all_rows: bool, as_json: bo
             f"${float(r['entry_price']):.4f}",
             f"${float(r['current_price']):.4f}",
             f"${float(r['position_size']):.2f}",
+            f"{float(r.get('kelly_fraction', 0)) * 100:.1f}%",
             f"[{pnl_style}]${pnl:+.2f}[/{pnl_style}]",
         ]
         if closed or worst:
