@@ -492,12 +492,14 @@ class TestBankrollIntegration:
         # spot=60000 vs start_spot=59000: p_up ≈ 1.0, mid = 0.31, so
         # edge ≈ 0.69. raw_kelly = 0.69 × 0.25 × 4.00 = 0.69. Cap=5,
         # headroom = 4 - 1 = 3. min(0.69, 5, 3) = 0.69.
+        # Integer-contract floor at fill=0.32: floor(0.69/0.32)=2 contracts
+        # → 2 × 0.32 = 0.64.
         repo = _FakeRepo()
         d = self._decider_with_bankroll(repo, free="4.00", max_size="5",
                                         kelly_max_fraction=0.25)
         d.evaluate(_row())
         assert len(repo.inserted) == 1
-        assert repo.inserted[0].size == Decimal("0.69")
+        assert repo.inserted[0].size == Decimal("0.64")
 
     def test_kelly_size_caps_at_position_size_when_bankroll_large(self):
         repo = _FakeRepo()
@@ -505,24 +507,28 @@ class TestBankrollIntegration:
                                         kelly_max_fraction=0.25)
         d.evaluate(_row())
         assert len(repo.inserted) == 1
-        # raw = |edge| × 0.25 × 200 = 50; capped at 5.
-        assert repo.inserted[0].size == Decimal("5")
+        # raw = |edge| × 0.25 × 200 = 50; capped at 5. Integer contracts
+        # at fill=0.32: floor(5/0.32)=15 contracts → 15 × 0.32 = 4.80.
+        assert repo.inserted[0].size == Decimal("4.80")
 
     def test_kelly_respects_headroom(self):
         # Free = $1.50, floor = $1.00. Headroom = 0.50. With a max-Kelly
         # setting of 1.0 the raw Kelly = 0.69 × 1.0 × 1.50 = 1.035, which
         # exceeds both the per-trade cap (5) and the headroom (0.50). The
-        # min is the headroom.
+        # min is the headroom. Integer contracts at fill=0.32:
+        # floor(0.50/0.32)=1 contract → 1 × 0.32 = 0.32.
         repo = _FakeRepo()
         d = self._decider_with_bankroll(repo, free="1.50", max_size="5",
                                         min_floor="1.0", kelly_max_fraction=1.0)
         d.evaluate(_row())
         assert len(repo.inserted) == 1
-        assert repo.inserted[0].size == Decimal("0.50")
+        assert repo.inserted[0].size == Decimal("0.32")
 
     def test_no_bankroll_provider_keeps_legacy_fixed_size(self):
-        """Backward-compat: tests and non-wired call sites still get a
-        fixed position_size_usd inserted, no Kelly scaling, no floor."""
+        """Backward-compat: tests and non-wired call sites size off the
+        fixed position_size_usd, no Kelly scaling, no floor — but still
+        flooring to whole contracts (Polymarket only fills integer lots).
+        At fill=0.32: floor(5/0.32)=15 contracts → 15 × 0.32 = 4.80."""
         repo = _FakeRepo()
         d = QuantDecider(
             sources={"BTC": _FakeSrc(Decimal("60000"))},
@@ -532,4 +538,4 @@ class TestBankrollIntegration:
         )
         d.evaluate(_row())
         assert len(repo.inserted) == 1
-        assert repo.inserted[0].size == Decimal("5")
+        assert repo.inserted[0].size == Decimal("4.80")

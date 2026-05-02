@@ -230,12 +230,19 @@ class QuantDecider:
                            mid=f"{mid:.4f}")
             return
 
+        # Determine side and fill before sizing so that integer-contract
+        # enforcement can use the actual per-contract cost.
+        if edge > 0:
+            side, fill = "YES", ask
+        else:
+            side, fill = "NO", bid
+
         # Bankroll floor + Kelly sizing. Kept out of the early-gate block
         # so that fee-of-edge checks don't run when bankroll has decided
         # we can't afford anything anyway. Decoupled from the cap check
         # because a tight bankroll is a stricter constraint than the
         # simultaneous-trades cap.
-        size = self._compute_size(edge, slug)
+        size = self._compute_size(edge, slug, fill)
         if size is None:
             return  # already logged
 
@@ -247,11 +254,6 @@ class QuantDecider:
                            gross_edge=f"{gross_edge_usd:.4f}",
                            fees=f"{fees_usd:.4f}")
             return
-
-        if edge > 0:
-            side, fill = "YES", ask
-        else:
-            side, fill = "NO", bid
 
         trade = QuantShortTrade(
             market_id=market_id,
@@ -271,16 +273,19 @@ class QuantDecider:
             slug, side, edge, p_up, mid, float(size), contracts, asset_id,
         )
 
-    def _compute_size(self, edge: float, slug: str) -> Decimal | None:
+    def _compute_size(self, edge: float, slug: str, fill: Decimal) -> Decimal | None:
         """Return the position size to insert, or None to skip.
 
         Returns None and logs a SKIP when the bankroll provider says the
         free balance is below the floor. Without a bankroll provider the
         legacy fixed-size behavior is preserved (used by tests and as a
         safe default if the wiring isn't set up).
+
+        ``fill`` is the per-contract price; the final size is always an
+        integer multiple of it because Polymarket trades whole contracts.
         """
         if self._bankroll_provider is None:
-            return self._size
+            return self._enforce_integer_contracts(self._size, fill, slug, headroom=None)
         state = self._bankroll_provider()
         free = state.free
         if free < self._min_free_bankroll:
@@ -311,7 +316,35 @@ class QuantDecider:
                                min=f"{self._min_order_size:.2f}",
                                headroom=f"{headroom:.2f}")
                 return None
-        return size.quantize(Decimal("0.01"))
+        return self._enforce_integer_contracts(size, fill, slug, headroom=headroom)
+
+    def _enforce_integer_contracts(
+        self,
+        size: Decimal,
+        fill: Decimal,
+        slug: str,
+        headroom: Decimal | None,
+    ) -> Decimal | None:
+        """Floor USD notional to a whole-contract amount; skip if 1 won't fit.
+
+        Polymarket only fills integer-contract orders. ``headroom=None``
+        marks the legacy fixed-size path (no bankroll provider) where
+        unbounded headroom is assumed.
+        """
+        if fill <= 0:
+            self._log_skip(slug, "degenerate_fill", fill=f"{fill}")
+            return None
+        contracts = int(size / fill)
+        if contracts < 1:
+            if headroom is None or headroom >= fill:
+                contracts = 1
+            else:
+                self._log_skip(slug, "below_min_contracts",
+                               size=f"{size:.4f}",
+                               fill=f"{fill:.4f}",
+                               headroom=f"{headroom:.2f}")
+                return None
+        return (Decimal(contracts) * fill).quantize(Decimal("0.01"))
 
     @staticmethod
     def _log_skip(slug: str, reason: str, **fields) -> None:

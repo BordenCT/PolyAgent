@@ -165,6 +165,28 @@ class ExecutorService:
                 )
                 return None
 
+        # Polymarket trades whole contracts only. Floor USD notional to the
+        # nearest integer-contract amount; if even one contract won't fit,
+        # skip rather than place a fractional order.
+        contract_price = market_p if side == PositionSide.BUY else (1.0 - market_p)
+        if contract_price <= 0:
+            logger.info(
+                "SKIP %s — degenerate contract price %.4f",
+                thesis.market_id, contract_price,
+            )
+            return None
+        contracts = int(position_size / contract_price)
+        if contracts < 1:
+            if headroom >= contract_price:
+                contracts = 1
+            else:
+                logger.info(
+                    "SKIP %s — below 1-contract minimum (price=$%.4f, headroom=$%.2f)",
+                    thesis.market_id, contract_price, headroom,
+                )
+                return None
+        position_size = round(contracts * contract_price, 2)
+
         # Target price tracked in YES coordinates so exit_monitor and status work uniformly.
         # For SELL, the expected move is negative (YES price should fall toward estimate).
         expected_gap = thesis.claude_estimate - market_p
