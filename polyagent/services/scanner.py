@@ -47,6 +47,38 @@ class ScannerService:
         self._max_price = max_price
         self._blocklist = tuple(re.compile(p, re.IGNORECASE) for p in question_blocklist)
 
+    def update_thresholds(
+        self,
+        min_gap: float | None = None,
+        min_depth: float | None = None,
+        min_hours: float | None = None,
+        max_hours: float | None = None,
+        min_price: float | None = None,
+        max_price: float | None = None,
+        question_blocklist: tuple[str, ...] | None = None,
+    ) -> None:
+        """Hot-reload scanner kill-filter thresholds from a fresh .env.
+
+        Called by the SIGHUP handler in main.py. None leaves the existing
+        value in place. The blocklist is recompiled when supplied.
+        """
+        if min_gap is not None:
+            self._min_gap = min_gap
+        if min_depth is not None:
+            self._min_depth = min_depth
+        if min_hours is not None:
+            self._min_hours = min_hours
+        if max_hours is not None:
+            self._max_hours = max_hours
+        if min_price is not None:
+            self._min_price = min_price
+        if max_price is not None:
+            self._max_price = max_price
+        if question_blocklist is not None:
+            self._blocklist = tuple(
+                re.compile(p, re.IGNORECASE) for p in question_blocklist
+            )
+
     def _is_blocked(self, question: str) -> bool:
         return any(p.search(question or "") for p in self._blocklist)
 

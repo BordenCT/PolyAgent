@@ -415,6 +415,7 @@ def run() -> None:
     # Single quant orchestrator owns all PriceSource ticks plus the
     # short-horizon scan/decide/resolve loop. The strike service shares the
     # same source dict, so there's no double-polling.
+    quant_decider: QuantDecider | None = None
     if quant_sources:
         book_fetcher = PolymarketBookFetcher(polymarket)
         quant_short_scanner = QuantShortScanner()
@@ -507,8 +508,105 @@ def run() -> None:
         logger.info("Shutdown signal received")
         queues.shutdown.put(True)
 
+    # Reload-safe knobs. Anything in this set can be hot-swapped via SIGHUP
+    # by editing .env and running `kill -HUP <pid>`. Restart-only fields
+    # (DATABASE_URL, *_WORKERS, API keys, LLM_PROVIDER, OLLAMA_URL/MODEL,
+    # POLYMARKET_API_URL, SCAN_INTERVAL_HOURS, SCAN_MARKET_LIMIT) are not
+    # in this set because they affect pre-allocated state (connection
+    # pools, worker threads, client SDKs) that the running process can't
+    # reliably swap underneath itself.
+    _RELOADABLE_FIELDS = (
+        "min_gap", "min_depth", "min_hours", "max_hours", "min_price",
+        "max_price", "scanner_question_blocklist",
+        "brain_confidence_threshold", "brain_min_checks", "brain_min_edge",
+        "kelly_max_fraction", "bankroll", "min_free_bankroll",
+        "min_order_size", "min_contracts",
+        "exit_target_pct", "exit_volume_multiplier", "exit_stale_hours",
+        "exit_stale_threshold", "exit_poll_delay",
+        "quant_position_size_usd", "quant_max_trades_per_cycle",
+        "quant_max_open_per_asset",
+        "paper_trade", "polymarket_live_enabled",
+    )
+
+    def reload_handler(signum, frame):
+        """SIGHUP: re-read .env and push new values into running services.
+
+        Reads .env with override=True so newer values win against the
+        process's current environment, then constructs a fresh Settings
+        snapshot and dispatches per-service updates. The diff against the
+        previous snapshot is logged so operators can see exactly what
+        changed (and what was edited but ignored as restart-only).
+        """
+        nonlocal settings
+        logger.info("SIGHUP received — reloading .env")
+        try:
+            from dotenv import load_dotenv
+            from pathlib import Path
+            env_path = Path.cwd() / ".env"
+            if env_path.exists():
+                load_dotenv(env_path, override=True)
+            new_settings = Settings.from_env()
+        except Exception:
+            logger.exception("reload failed — keeping previous settings")
+            return
+
+        old = settings
+        changes = {
+            f: (getattr(old, f), getattr(new_settings, f))
+            for f in _RELOADABLE_FIELDS
+            if getattr(old, f) != getattr(new_settings, f)
+        }
+        if not changes:
+            logger.info("reload: no reloadable fields changed")
+            settings = new_settings
+            return
+
+        for f, (was, now) in changes.items():
+            logger.info("reload: %s %r -> %r", f, was, now)
+
+        scanner.update_thresholds(
+            min_gap=new_settings.min_gap,
+            min_depth=new_settings.min_depth,
+            min_hours=new_settings.min_hours,
+            max_hours=new_settings.max_hours,
+            min_price=new_settings.min_price,
+            max_price=new_settings.max_price,
+            question_blocklist=new_settings.scanner_question_blocklist,
+        )
+        brain.update_thresholds(
+            confidence_threshold=new_settings.brain_confidence_threshold,
+            min_checks=new_settings.brain_min_checks,
+            min_edge=new_settings.brain_min_edge,
+        )
+        executor.update_thresholds(
+            kelly_max_fraction=new_settings.kelly_max_fraction,
+            bankroll=new_settings.bankroll,
+            min_free_bankroll=new_settings.min_free_bankroll,
+            min_order_size=new_settings.min_order_size,
+            min_contracts=new_settings.min_contracts,
+        )
+        exit_monitor.update_thresholds(
+            target_pct=new_settings.exit_target_pct,
+            volume_multiplier=new_settings.exit_volume_multiplier,
+            stale_hours=new_settings.exit_stale_hours,
+            stale_threshold=new_settings.exit_stale_threshold,
+        )
+        if quant_decider is not None:
+            quant_decider.update_thresholds(
+                position_size_usd=Decimal(str(new_settings.quant_position_size_usd)),
+                max_trades_per_cycle=new_settings.quant_max_trades_per_cycle,
+                max_open_per_asset=new_settings.quant_max_open_per_asset,
+                kelly_max_fraction=new_settings.kelly_max_fraction,
+                min_free_bankroll=Decimal(str(new_settings.min_free_bankroll)),
+                min_order_size=Decimal(str(new_settings.min_order_size)),
+                min_contracts=new_settings.min_contracts,
+            )
+        settings = new_settings
+        logger.info("reload: applied %d field change(s)", len(changes))
+
     signal.signal(signal.SIGINT, shutdown_handler)
     signal.signal(signal.SIGTERM, shutdown_handler)
+    signal.signal(signal.SIGHUP, reload_handler)
 
     try:
         while queues.shutdown.empty():

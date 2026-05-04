@@ -114,6 +114,36 @@ class QuantDecider:
         self._min_order_size = Decimal(str(min_order_size))
         self._min_contracts = max(1, int(min_contracts))
 
+    def update_thresholds(
+        self,
+        position_size_usd: Decimal | None = None,
+        max_trades_per_cycle: int | None = None,
+        max_open_per_asset: int | None = None,
+        kelly_max_fraction: float | None = None,
+        min_free_bankroll: Decimal | None = None,
+        min_order_size: Decimal | None = None,
+        min_contracts: int | None = None,
+    ) -> None:
+        """Hot-reload sizing/cap knobs from a fresh .env without restart.
+
+        Mirrors :meth:`ExecutorService.update_thresholds`. Each kwarg is
+        optional; None leaves the existing value in place.
+        """
+        if position_size_usd is not None:
+            self._size = position_size_usd
+        if max_trades_per_cycle is not None:
+            self._max_per_cycle = max_trades_per_cycle
+        if max_open_per_asset is not None:
+            self._max_open_per_asset = max_open_per_asset
+        if kelly_max_fraction is not None:
+            self._kelly_max_fraction = float(kelly_max_fraction)
+        if min_free_bankroll is not None:
+            self._min_free_bankroll = Decimal(str(min_free_bankroll))
+        if min_order_size is not None:
+            self._min_order_size = Decimal(str(min_order_size))
+        if min_contracts is not None:
+            self._min_contracts = max(1, int(min_contracts))
+
     def reset_cycle(self) -> None:
         """Reset the per-cycle trade counter. Call at the start of each scan."""
         self._opened_this_cycle = 0

@@ -225,3 +225,21 @@ class TestExitMonitor:
             is_resolved=True,
         )
         assert result == ExitReason.RESOLVED_NO
+
+
+class TestExitMonitorHotReload:
+    def test_update_thresholds_changes_target_pct(self):
+        m = ExitMonitorService(target_pct=0.85)
+        m.update_thresholds(target_pct=0.50)
+        assert m.target_pct == 0.50
+
+    def test_update_thresholds_none_kwargs_preserve(self):
+        m = ExitMonitorService(
+            target_pct=0.85, volume_multiplier=3.0,
+            stale_hours=24.0, stale_threshold=0.02,
+        )
+        m.update_thresholds(volume_multiplier=5.0)
+        assert m.volume_multiplier == 5.0
+        assert m.target_pct == 0.85
+        assert m.stale_hours == 24.0
+        assert m.stale_threshold == 0.02

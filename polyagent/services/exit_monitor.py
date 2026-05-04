@@ -26,6 +26,30 @@ class ExitMonitorService:
         self._stale_threshold = stale_threshold
         self._resolved_no_threshold = resolved_no_threshold
 
+    def update_thresholds(
+        self,
+        target_pct: float | None = None,
+        volume_multiplier: float | None = None,
+        stale_hours: float | None = None,
+        stale_threshold: float | None = None,
+        resolved_no_threshold: float | None = None,
+    ) -> None:
+        """Hot-reload exit triggers from a fresh .env without restart.
+
+        Called by the SIGHUP handler in main.py. None leaves the existing
+        value in place.
+        """
+        if target_pct is not None:
+            self._target_pct = target_pct
+        if volume_multiplier is not None:
+            self._volume_multiplier = volume_multiplier
+        if stale_hours is not None:
+            self._stale_hours = stale_hours
+        if stale_threshold is not None:
+            self._stale_threshold = stale_threshold
+        if resolved_no_threshold is not None:
+            self._resolved_no_threshold = resolved_no_threshold
+
     @property
     def target_pct(self) -> float:
         return self._target_pct

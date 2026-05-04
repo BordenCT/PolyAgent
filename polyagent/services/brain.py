@@ -53,6 +53,24 @@ class BrainService:
         self._min_edge = min_edge
         self._crypto_quant = crypto_quant
 
+    def update_thresholds(
+        self,
+        confidence_threshold: float | None = None,
+        min_checks: int | None = None,
+        min_edge: float | None = None,
+    ) -> None:
+        """Hot-reload brain gates from a fresh .env without restart.
+
+        Called by the SIGHUP handler in main.py. None leaves the existing
+        value in place.
+        """
+        if confidence_threshold is not None:
+            self._confidence_threshold = confidence_threshold
+        if min_checks is not None:
+            self._min_checks = min_checks
+        if min_edge is not None:
+            self._min_edge = min_edge
+
     def evaluate(self, market: MarketData, market_db_id: UUID) -> Thesis | None:
         """Run 4-check evaluation on a market. Returns Thesis or None if rejected.
 

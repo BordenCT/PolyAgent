@@ -616,3 +616,63 @@ class TestBankrollIntegration:
         d.evaluate(_row())
         assert len(repo.inserted) == 1
         assert repo.inserted[0].size == Decimal("4.80")
+
+
+class TestQuantDeciderHotReload:
+    """update_thresholds: SIGHUP reload must change subsequent decisions
+    without recreating the service."""
+
+    def test_min_contracts_reload_changes_size(self):
+        """Same market, same edge, same fill: switching min_contracts
+        from 1 to 5 lifts the inserted size to 5 × 0.32."""
+        repo = _FakeRepo()
+        d = QuantDecider(
+            sources={"BTC": _FakeSrc(Decimal("60000"))},
+            book=_FakeBook((Decimal("0.30"), Decimal("0.32"))),
+            repo=repo,
+            position_size_usd=Decimal("0.10"),  # forces sub-1-contract Kelly
+            min_contracts=1,
+        )
+        d.evaluate(_row())
+        assert repo.inserted[-1].size == Decimal("0.32")  # 1 × 0.32
+
+        # New cycle, hot-reload to min=5.
+        d.reset_cycle()
+        d.update_thresholds(min_contracts=5)
+        row = _row()
+        row["id"] = "m2"
+        d.evaluate(row)
+        assert repo.inserted[-1].size == Decimal("1.60")  # 5 × 0.32
+
+    def test_update_thresholds_clamps_min_contracts_to_one(self):
+        d = QuantDecider(
+            sources={"BTC": _FakeSrc(Decimal("60000"))},
+            book=_FakeBook((Decimal("0.30"), Decimal("0.32"))),
+            repo=_FakeRepo(),
+            position_size_usd=Decimal("5"),
+            min_contracts=3,
+        )
+        d.update_thresholds(min_contracts=0)
+        assert d._min_contracts == 1
+
+    def test_update_thresholds_none_kwargs_preserve_existing(self):
+        d = QuantDecider(
+            sources={"BTC": _FakeSrc(Decimal("60000"))},
+            book=_FakeBook((Decimal("0.30"), Decimal("0.32"))),
+            repo=_FakeRepo(),
+            position_size_usd=Decimal("5"),
+            max_trades_per_cycle=7,
+            max_open_per_asset=2,
+            kelly_max_fraction=0.20,
+            min_free_bankroll=Decimal("2"),
+            min_order_size=Decimal("3"),
+            min_contracts=4,
+        )
+        d.update_thresholds(position_size_usd=Decimal("9"))
+        assert d._size == Decimal("9")
+        assert d._max_per_cycle == 7
+        assert d._max_open_per_asset == 2
+        assert d._kelly_max_fraction == 0.20
+        assert d._min_free_bankroll == Decimal("2")
+        assert d._min_order_size == Decimal("3")
+        assert d._min_contracts == 4

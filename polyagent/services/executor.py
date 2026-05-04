@@ -53,6 +53,33 @@ class ExecutorService:
         self._min_order_size = min_order_size
         self._min_contracts = max(1, int(min_contracts))
 
+    def update_thresholds(
+        self,
+        kelly_max_fraction: float | None = None,
+        bankroll: float | None = None,
+        min_free_bankroll: float | None = None,
+        min_order_size: float | None = None,
+        min_contracts: int | None = None,
+    ) -> None:
+        """Hot-reload sizing knobs from a fresh .env without restart.
+
+        Called by the SIGHUP handler in main.py. Each kwarg is optional;
+        None leaves the existing value in place. Writes are individual
+        attribute assignments (atomic under the GIL); a worker mid-Kelly
+        may briefly observe an inconsistent split across two fields, which
+        is harmless for the next-trade scope these knobs control.
+        """
+        if kelly_max_fraction is not None:
+            self._kelly_max_fraction = kelly_max_fraction
+        if bankroll is not None:
+            self._bankroll = bankroll
+        if min_free_bankroll is not None:
+            self._min_free_bankroll = min_free_bankroll
+        if min_order_size is not None:
+            self._min_order_size = min_order_size
+        if min_contracts is not None:
+            self._min_contracts = max(1, int(min_contracts))
+
     def kelly_size(
         self,
         p_win: float,

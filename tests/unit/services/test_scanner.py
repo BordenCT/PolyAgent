@@ -113,3 +113,26 @@ class TestScoreMarket:
         score = self.scanner.score_market(market, historical_estimate)
         assert score is not None
         assert score.gap == pytest.approx(0.08, abs=0.001)
+
+    def test_update_thresholds_changes_gap_filter(self):
+        """SIGHUP reload: tightening MIN_GAP must reject markets that
+        previously passed."""
+        market = self._make_market(midpoint_price=Decimal("0.50"))
+        historical_estimate = 0.58  # gap = 0.08
+        assert self.scanner.score_market(market, historical_estimate) is not None
+
+        self.scanner.update_thresholds(min_gap=0.10)
+        assert self.scanner.score_market(market, historical_estimate) is None
+
+    def test_update_thresholds_recompiles_blocklist(self):
+        """A new question_blocklist regex must take effect on the next call."""
+        market = self._make_market(question="Will BTC moon by Friday?")
+        # Default blocklist doesn't match this question.
+        assert self.scanner.score_market(market, 0.60) is not None
+        self.scanner.update_thresholds(question_blocklist=(r"moon",))
+        assert self.scanner.score_market(market, 0.60) is None
+
+    def test_update_thresholds_none_kwargs_preserve(self):
+        self.scanner.update_thresholds(min_gap=0.20)
+        assert self.scanner._min_gap == 0.20
+        assert self.scanner._min_depth == 500.0  # untouched

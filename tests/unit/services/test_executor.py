@@ -239,3 +239,62 @@ class TestMinContractsFloor:
             market_price=Decimal("0.65"),
         )
         assert position is not None  # 1 × $0.65 fits headroom
+
+
+class TestExecutorHotReload:
+    """update_thresholds: verify SIGHUP reloads change subsequent trade behavior
+    without recreating the service."""
+
+    def _thesis(self) -> Thesis:
+        return Thesis.create(
+            market_id=uuid4(),
+            claude_estimate=0.82,
+            confidence=0.85,
+            checks=ThesisChecks(base_rate=True, news=True, whale=False, disposition=True),
+            thesis_text="t",
+        )
+
+    def _buy_votes(self) -> list[Vote]:
+        return [
+            Vote(action=VoteAction.BUY, confidence=0.8, reason="a"),
+            Vote(action=VoteAction.BUY, confidence=0.7, reason="b"),
+            Vote(action=VoteAction.HOLD, confidence=0.3, reason="c"),
+        ]
+
+    def test_min_contracts_reload_blocks_thin_bankroll(self):
+        """Started with min_contracts=1, a $2 bankroll trades fine. After
+        update_thresholds(min_contracts=10) the same call gets refused
+        because 10 × $0.65 = $6.50 exceeds headroom."""
+        ex = ExecutorService(
+            kelly_max_fraction=0.25, bankroll=2.0, paper_trade=True,
+            min_free_bankroll=1.0,
+            min_contracts=1,
+        )
+        # Pre-reload: trade fires.
+        first = ex.execute(self._thesis(), self._buy_votes(), Decimal("0.65"))
+        assert first is not None
+
+        ex.update_thresholds(min_contracts=10)
+        second = ex.execute(self._thesis(), self._buy_votes(), Decimal("0.65"))
+        assert second is None  # min_contracts × price now exceeds headroom
+
+    def test_update_thresholds_clamps_min_contracts_to_one(self):
+        """Misconfiguration (e.g. MIN_CONTRACTS=0) must not silently
+        disable the integer-contract floor."""
+        ex = ExecutorService(min_contracts=5)
+        ex.update_thresholds(min_contracts=0)
+        assert ex._min_contracts == 1
+
+    def test_update_thresholds_none_kwargs_preserve_existing(self):
+        """Reload only writes the fields the caller supplied; everything
+        else keeps its prior value."""
+        ex = ExecutorService(
+            kelly_max_fraction=0.25, bankroll=800.0,
+            min_free_bankroll=1.0, min_order_size=2.0, min_contracts=3,
+        )
+        ex.update_thresholds(kelly_max_fraction=0.10)
+        assert ex._kelly_max_fraction == 0.10
+        assert ex._bankroll == 800.0
+        assert ex._min_free_bankroll == 1.0
+        assert ex._min_order_size == 2.0
+        assert ex._min_contracts == 3
