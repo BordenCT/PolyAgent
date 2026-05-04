@@ -91,6 +91,37 @@ class TestPolymarketClient:
         assert market.token_id == "tok_yes"
         assert market.token_id_no == ""
 
+    def test_parse_market_pairs_range_market_tokens(self):
+        """Range / between markets ('Will BTC be between $90k and $95k?')
+        are still binary on Polymarket: each price bucket is its own market
+        with outcomes ['Yes', 'No']. The YES token represents 'price in
+        range' and NO represents 'price not in range', so SELL routes the
+        same as for any other binary market."""
+        raw = dict(
+            _GAMMA_RAW,
+            question="Will the price of Bitcoin be between $90,000 and $95,000 by July 2026?",
+            outcomes=json.dumps(["Yes", "No"]),
+            clobTokenIds=json.dumps(["range_yes", "range_no"]),
+        )
+        market = self.client.parse_market(raw)
+        assert market is not None
+        assert market.token_id == "range_yes"
+        assert market.token_id_no == "range_no"
+
+    def test_parse_market_categorical_leaves_no_token_empty(self):
+        """Multi-outcome markets (3+ outcomes, e.g. categorical politics)
+        are not binary; pairing must abstain so SELL fails loud rather
+        than route onto an arbitrary outcome token."""
+        raw = dict(
+            _GAMMA_RAW,
+            outcomes=json.dumps(["Alice", "Bob", "Carol"]),
+            clobTokenIds=json.dumps(["tok_a", "tok_b", "tok_c"]),
+        )
+        market = self.client.parse_market(raw)
+        assert market is not None
+        assert market.token_id == "tok_a"  # legacy index-0 fallback
+        assert market.token_id_no == ""
+
 
 class TestFetchMarketState:
     def setup_method(self):
