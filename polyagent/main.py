@@ -157,6 +157,7 @@ def run() -> None:
         paper_trade=settings.paper_trade,
         min_free_bankroll=settings.min_free_bankroll,
         min_order_size=settings.min_order_size,
+        min_contracts=settings.min_contracts,
     )
     exit_monitor = ExitMonitorService(
         target_pct=settings.exit_target_pct,
@@ -433,6 +434,7 @@ def run() -> None:
             kelly_max_fraction=settings.kelly_max_fraction,
             min_free_bankroll=Decimal(str(settings.min_free_bankroll)),
             min_order_size=Decimal(str(settings.min_order_size)),
+            min_contracts=settings.min_contracts,
         )
         quant_resolver = QuantResolver(
             repo=quant_short_repo,

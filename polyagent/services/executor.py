@@ -44,12 +44,14 @@ class ExecutorService:
         paper_trade: bool = True,
         min_free_bankroll: float = 0.0,
         min_order_size: float = 0.0,
+        min_contracts: int = 1,
     ) -> None:
         self._kelly_max_fraction = kelly_max_fraction
         self._bankroll = bankroll
         self._paper_trade = paper_trade
         self._min_free_bankroll = min_free_bankroll
         self._min_order_size = min_order_size
+        self._min_contracts = max(1, int(min_contracts))
 
     def kelly_size(
         self,
@@ -166,8 +168,8 @@ class ExecutorService:
                 return None
 
         # Polymarket trades whole contracts only. Floor USD notional to the
-        # nearest integer-contract amount; if even one contract won't fit,
-        # skip rather than place a fractional order.
+        # nearest integer-contract amount and enforce the configured
+        # minimum-contracts floor; skip if even that minimum won't fit.
         contract_price = market_p if side == PositionSide.BUY else (1.0 - market_p)
         if contract_price <= 0:
             logger.info(
@@ -176,13 +178,14 @@ class ExecutorService:
             )
             return None
         contracts = int(position_size / contract_price)
-        if contracts < 1:
-            if headroom >= contract_price:
-                contracts = 1
+        if contracts < self._min_contracts:
+            min_notional = self._min_contracts * contract_price
+            if headroom >= min_notional:
+                contracts = self._min_contracts
             else:
                 logger.info(
-                    "SKIP %s — below 1-contract minimum (price=$%.4f, headroom=$%.2f)",
-                    thesis.market_id, contract_price, headroom,
+                    "SKIP %s — below %d-contract minimum (price=$%.4f, headroom=$%.2f, need=$%.2f)",
+                    thesis.market_id, self._min_contracts, contract_price, headroom, min_notional,
                 )
                 return None
         position_size = round(contracts * contract_price, 2)

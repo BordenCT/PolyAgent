@@ -60,6 +60,7 @@ class Settings:
     brain_min_edge: float
     kelly_max_fraction: float
     min_order_size: float
+    min_contracts: int
     bankroll: float
     min_free_bankroll: float
     market_cooldown_hours: float
@@ -127,6 +128,7 @@ class Settings:
             brain_min_edge=_env_float("BRAIN_MIN_EDGE", 0.03),
             kelly_max_fraction=_env_float("KELLY_MAX_FRACTION", 0.25),
             min_order_size=_env_float("MIN_ORDER_SIZE", 1.0),
+            min_contracts=_env_int("MIN_CONTRACTS", 1),
             bankroll=_env_float("BANKROLL", 800.0),
             min_free_bankroll=_env_float("MIN_FREE_BANKROLL", 1.0),
             market_cooldown_hours=_env_float("MARKET_COOLDOWN_HOURS", 24.0),

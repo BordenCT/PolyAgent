@@ -98,6 +98,7 @@ class QuantDecider:
         kelly_max_fraction: float = 0.25,
         min_free_bankroll: Decimal = Decimal("1.0"),
         min_order_size: Decimal = Decimal("0.0"),
+        min_contracts: int = 1,
     ) -> None:
         self._sources = sources
         self._book = book
@@ -111,6 +112,7 @@ class QuantDecider:
         self._kelly_max_fraction = float(kelly_max_fraction)
         self._min_free_bankroll = Decimal(str(min_free_bankroll))
         self._min_order_size = Decimal(str(min_order_size))
+        self._min_contracts = max(1, int(min_contracts))
 
     def reset_cycle(self) -> None:
         """Reset the per-cycle trade counter. Call at the start of each scan."""
@@ -335,13 +337,16 @@ class QuantDecider:
             self._log_skip(slug, "degenerate_fill", fill=f"{fill}")
             return None
         contracts = int(size / fill)
-        if contracts < 1:
-            if headroom is None or headroom >= fill:
-                contracts = 1
+        if contracts < self._min_contracts:
+            min_notional = Decimal(self._min_contracts) * fill
+            if headroom is None or headroom >= min_notional:
+                contracts = self._min_contracts
             else:
                 self._log_skip(slug, "below_min_contracts",
                                size=f"{size:.4f}",
                                fill=f"{fill:.4f}",
+                               min=str(self._min_contracts),
+                               need=f"{min_notional:.4f}",
                                headroom=f"{headroom:.2f}")
                 return None
         return (Decimal(contracts) * fill).quantize(Decimal("0.01"))

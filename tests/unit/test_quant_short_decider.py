@@ -524,6 +524,83 @@ class TestBankrollIntegration:
         assert len(repo.inserted) == 1
         assert repo.inserted[0].size == Decimal("0.32")
 
+    def test_min_contracts_floor_bumps_size_when_headroom_allows(self):
+        """With min_contracts=5 the decider must lift below-floor entries
+        to N×fill rather than ship a smaller integer-contract order."""
+        repo = _FakeRepo()
+        # Free=$4, floor=$1, headroom=$3. fill=0.32, max_size=$5.
+        # Kelly=0.69 → floor(0.69/0.32)=2 contracts, but min_contracts=5
+        # → bump to 5×0.32 = $1.60 (3 < 1.60 ✓ headroom OK).
+        bk = BankrollState(
+            starting=Decimal("20"),
+            realized_main=Decimal("0"),
+            realized_quant=Decimal("0"),
+            open_capital_main=Decimal("0"),
+            open_capital_quant=Decimal("16"),
+        )
+        d = QuantDecider(
+            sources={"BTC": _FakeSrc(Decimal("60000"))},
+            book=_FakeBook((Decimal("0.30"), Decimal("0.32"))),
+            repo=repo,
+            position_size_usd=Decimal("5"),
+            settlements={"BTC": _FakeSettlement(Decimal("59000"))},
+            bankroll_provider=lambda: bk,
+            kelly_max_fraction=0.25,
+            min_free_bankroll=Decimal("1.0"),
+            min_contracts=5,
+        )
+        d.evaluate(_row())
+        assert len(repo.inserted) == 1
+        assert repo.inserted[0].size == Decimal("1.60")
+
+    def test_min_contracts_floor_skips_when_headroom_insufficient(self, caplog):
+        """When even the min-contracts floor exceeds headroom, skip
+        with reason=below_min_contracts so operators can grep it."""
+        repo = _FakeRepo()
+        # Free=$1.40, floor=$1, headroom=$0.40. fill=0.32, min=5
+        # → need 5×0.32 = $1.60 > $0.40 headroom → skip.
+        bk = BankrollState(
+            starting=Decimal("20"),
+            realized_main=Decimal("0"),
+            realized_quant=Decimal("0"),
+            open_capital_main=Decimal("0"),
+            open_capital_quant=Decimal("18.60"),
+        )
+        d = QuantDecider(
+            sources={"BTC": _FakeSrc(Decimal("60000"))},
+            book=_FakeBook((Decimal("0.30"), Decimal("0.32"))),
+            repo=repo,
+            position_size_usd=Decimal("5"),
+            settlements={"BTC": _FakeSettlement(Decimal("59000"))},
+            bankroll_provider=lambda: bk,
+            kelly_max_fraction=0.25,
+            min_free_bankroll=Decimal("1.0"),
+            min_contracts=5,
+        )
+        row = _row()
+        row["slug"] = "btc-updown-5m-min-test"
+        with caplog.at_level("INFO", logger="polyagent.services.quant.short_horizon.decider"):
+            d.evaluate(row)
+        assert repo.inserted == []
+        msg = next(r.message for r in caplog.records if "below_min_contracts" in r.message)
+        assert "min=5" in msg
+
+    def test_min_contracts_floor_legacy_fixed_size_path(self):
+        """Without a bankroll provider, headroom is unbounded → bump to
+        min_contracts is always allowed."""
+        repo = _FakeRepo()
+        d = QuantDecider(
+            sources={"BTC": _FakeSrc(Decimal("60000"))},
+            book=_FakeBook((Decimal("0.30"), Decimal("0.32"))),
+            repo=repo,
+            position_size_usd=Decimal("0.10"),  # tiny — would yield 0 contracts
+            min_contracts=3,
+        )
+        d.evaluate(_row())
+        assert len(repo.inserted) == 1
+        # 3 contracts × 0.32 fill = 0.96
+        assert repo.inserted[0].size == Decimal("0.96")
+
     def test_no_bankroll_provider_keeps_legacy_fixed_size(self):
         """Backward-compat: tests and non-wired call sites size off the
         fixed position_size_usd, no Kelly scaling, no floor — but still

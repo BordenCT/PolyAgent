@@ -174,3 +174,68 @@ class TestExecute:
         consensus, fraction, side = self.executor.compute_consensus(votes)
         assert consensus == Consensus.NONE
         assert side is None
+
+
+class TestMinContractsFloor:
+    """MIN_CONTRACTS env knob: enforce at least N whole contracts per trade."""
+
+    def _thesis(self, estimate: float = 0.82) -> Thesis:
+        return Thesis.create(
+            market_id=uuid4(),
+            claude_estimate=estimate,
+            confidence=0.85,
+            checks=ThesisChecks(base_rate=True, news=True, whale=False, disposition=True),
+            thesis_text="t",
+        )
+
+    def _buy_votes(self) -> list[Vote]:
+        return [
+            Vote(action=VoteAction.BUY, confidence=0.8, reason="a"),
+            Vote(action=VoteAction.BUY, confidence=0.7, reason="b"),
+            Vote(action=VoteAction.HOLD, confidence=0.3, reason="c"),
+        ]
+
+    def test_min_contracts_bumps_size_when_headroom_allows(self):
+        """A small Kelly should be lifted to N × contract_price when
+        min_contracts forces a higher floor and the bankroll can support it."""
+        ex = ExecutorService(
+            kelly_max_fraction=0.25, bankroll=800.0, paper_trade=True,
+            min_contracts=10,
+        )
+        position = ex.execute(
+            thesis=self._thesis(estimate=0.82),
+            votes=self._buy_votes(),
+            market_price=Decimal("0.65"),
+        )
+        assert position is not None
+        # 10 contracts × $0.65 = $6.50 minimum; the actual size is
+        # whichever larger integer fits Kelly. Either way the floor holds.
+        contracts = float(position.position_size) / 0.65
+        assert contracts >= 10
+
+    def test_min_contracts_skips_when_bankroll_too_thin(self):
+        """If even the floor won't fit headroom, refuse the trade."""
+        ex = ExecutorService(
+            kelly_max_fraction=0.25, bankroll=2.0, paper_trade=True,
+            min_free_bankroll=1.0,  # headroom = $1.0
+            min_contracts=10,        # need 10 × 0.65 = $6.50 >> $1.0
+        )
+        position = ex.execute(
+            thesis=self._thesis(estimate=0.82),
+            votes=self._buy_votes(),
+            market_price=Decimal("0.65"),
+        )
+        assert position is None
+
+    def test_min_contracts_default_is_one(self):
+        """Default constructor keeps the pre-config behavior of 1 contract."""
+        ex = ExecutorService(
+            kelly_max_fraction=0.25, bankroll=2.0, paper_trade=True,
+            min_free_bankroll=1.0,  # headroom = $1.0, plenty for 1 contract
+        )
+        position = ex.execute(
+            thesis=self._thesis(estimate=0.82),
+            votes=self._buy_votes(),
+            market_price=Decimal("0.65"),
+        )
+        assert position is not None  # 1 × $0.65 fits headroom

@@ -64,3 +64,16 @@ def test_quant_from_env(monkeypatch):
     s = Settings.from_env()
     assert s.quant_short_enabled is True
     assert s.quant_position_size_usd == 10.0
+
+
+def test_min_contracts_defaults_to_one():
+    with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "sk-test"}, clear=False):
+        s = Settings.from_env()
+        assert s.min_contracts == 1
+
+
+def test_min_contracts_override_from_env(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    monkeypatch.setenv("MIN_CONTRACTS", "5")
+    s = Settings.from_env()
+    assert s.min_contracts == 5
