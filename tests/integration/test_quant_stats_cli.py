@@ -70,3 +70,34 @@ def test_quant_stats_filters_by_asset(seeded_db):
     result_eth = runner.invoke(quant_stats, ["--asset", "ETH"], env={"DATABASE_URL": _TEST_DB_URL})
     assert result_eth.exit_code == 0, result_eth.output
     assert "Trades" in result_eth.output
+
+
+def test_quant_stats_by_edge(seeded_db):
+    """Calibration view: trades fall into |edge| buckets (0.05-0.10, 0.10-0.15)
+    and the table renders without error. Two YES wins (edges 0.10, 0.08) and
+    one NO loss (edge 0.10) all fall in the 0.05-0.10 / 0.10-0.15 buckets."""
+    runner = CliRunner()
+    result = runner.invoke(quant_stats, ["--by-edge"], env={"DATABASE_URL": _TEST_DB_URL})
+    assert result.exit_code == 0, result.output
+    assert "Calibration" in result.output
+    assert "0.05-0.10" in result.output or "0.10-0.15" in result.output
+
+
+def test_quant_stats_by_side(seeded_db):
+    """Side breakdown: 2 YES trades and 1 NO trade should both surface."""
+    runner = CliRunner()
+    result = runner.invoke(quant_stats, ["--by-side"], env={"DATABASE_URL": _TEST_DB_URL})
+    assert result.exit_code == 0, result.output
+    assert "by Side" in result.output
+    assert "YES" in result.output
+    assert "NO" in result.output
+
+
+def test_quant_stats_by_vol(seeded_db):
+    """Vol regime: all seeded trades have vol_at_decision=0.40, so they
+    land in the '0.30-0.60 (normal)' bucket."""
+    runner = CliRunner()
+    result = runner.invoke(quant_stats, ["--by-vol"], env={"DATABASE_URL": _TEST_DB_URL})
+    assert result.exit_code == 0, result.output
+    assert "Vol Regime" in result.output
+    assert "0.30-0.60" in result.output

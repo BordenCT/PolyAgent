@@ -65,6 +65,93 @@ STATS_QUERY_BY_ASSET = """
     ORDER BY asset_id
 """
 
+# Calibration: does win-rate rise with |edge|? If yes, the model has signal
+# and the edge_threshold may just be too close to costs. If win% is flat
+# across all buckets (~50%), the model has no real signal and tuning the
+# threshold won't help — calibration of vol or model choice is the issue.
+STATS_QUERY_BY_EDGE = """
+    SELECT
+        CASE
+            WHEN abs_edge < 0.10 THEN '0.05-0.10'
+            WHEN abs_edge < 0.15 THEN '0.10-0.15'
+            WHEN abs_edge < 0.20 THEN '0.15-0.20'
+            ELSE '0.20+'
+        END AS edge_bucket,
+        CASE
+            WHEN abs_edge < 0.10 THEN 1
+            WHEN abs_edge < 0.15 THEN 2
+            WHEN abs_edge < 0.20 THEN 3
+            ELSE 4
+        END AS bucket_order,
+        COUNT(*)                            AS trades,
+        COUNT(*) FILTER (WHERE won)         AS wins,
+        COUNT(*) FILTER (WHERE NOT won)     AS losses,
+        COALESCE(AVG(abs_edge), 0)          AS avg_edge,
+        COALESCE(SUM(pnl), 0)               AS total_pnl,
+        COALESCE(AVG(pnl), 0)               AS avg_pnl,
+        COALESCE(SUM(size), 0)              AS total_staked,
+        COALESCE(AVG(size / NULLIF(fill_price_assumed, 0)), 0) AS avg_contracts
+    FROM quant_short_v
+    WHERE pnl IS NOT NULL
+      AND (%(asset)s::text IS NULL OR asset_id = %(asset)s)
+    GROUP BY edge_bucket, bucket_order
+    ORDER BY bucket_order
+"""
+
+# Side bias: YES vs NO win rates should be roughly equal under a fair
+# directional model. Persistent skew suggests routing/pricing asymmetry
+# (e.g., NO-side fills systematically worse, or vol drift in one direction).
+STATS_QUERY_BY_SIDE = """
+    SELECT
+        side,
+        COUNT(*)                            AS trades,
+        COUNT(*) FILTER (WHERE won)         AS wins,
+        COUNT(*) FILTER (WHERE NOT won)     AS losses,
+        COALESCE(AVG(abs_edge), 0)          AS avg_edge,
+        COALESCE(SUM(pnl), 0)               AS total_pnl,
+        COALESCE(AVG(pnl), 0)               AS avg_pnl,
+        COALESCE(SUM(size), 0)              AS total_staked,
+        COALESCE(AVG(size / NULLIF(fill_price_assumed, 0)), 0) AS avg_contracts
+    FROM quant_short_v
+    WHERE pnl IS NOT NULL
+      AND (%(asset)s::text IS NULL OR asset_id = %(asset)s)
+    GROUP BY side
+    ORDER BY side
+"""
+
+# Vol regime: rolling realized vol can collapse during quiet stretches,
+# making Phi(d2) overconfident and manufacturing fake edges. Buckets are
+# wide because realized vol on Coinbase BTC clusters around 0.3–0.7
+# annualized; tail buckets catch genuinely extreme regimes.
+STATS_QUERY_BY_VOL = """
+    SELECT
+        CASE
+            WHEN vol_at_decision < 0.30 THEN '<0.30 (calm)'
+            WHEN vol_at_decision < 0.60 THEN '0.30-0.60 (normal)'
+            WHEN vol_at_decision < 1.00 THEN '0.60-1.00 (active)'
+            ELSE '1.00+ (extreme)'
+        END AS vol_bucket,
+        CASE
+            WHEN vol_at_decision < 0.30 THEN 1
+            WHEN vol_at_decision < 0.60 THEN 2
+            WHEN vol_at_decision < 1.00 THEN 3
+            ELSE 4
+        END AS bucket_order,
+        COUNT(*)                            AS trades,
+        COUNT(*) FILTER (WHERE won)         AS wins,
+        COUNT(*) FILTER (WHERE NOT won)     AS losses,
+        COALESCE(AVG(abs_edge), 0)          AS avg_edge,
+        COALESCE(SUM(pnl), 0)               AS total_pnl,
+        COALESCE(AVG(pnl), 0)               AS avg_pnl,
+        COALESCE(SUM(size), 0)              AS total_staked,
+        COALESCE(AVG(size / NULLIF(fill_price_assumed, 0)), 0) AS avg_contracts
+    FROM quant_short_v
+    WHERE pnl IS NOT NULL
+      AND (%(asset)s::text IS NULL OR asset_id = %(asset)s)
+    GROUP BY vol_bucket, bucket_order
+    ORDER BY bucket_order
+"""
+
 
 def _fmt_duration(seconds: int) -> str:
     """Format a duration in seconds to a human-readable string (e.g. 300 -> '5m')."""
@@ -128,7 +215,23 @@ def _render_breakdown(console: Console, rows, title: str, key_col: str, key_fmt)
               help="Break out performance per window duration (5m vs 15m vs ...).")
 @click.option("--by-asset", is_flag=True,
               help="Break out performance per asset_id.")
-def quant_stats(asset: str | None, by_duration: bool, by_asset: bool) -> None:
+@click.option("--by-edge", is_flag=True,
+              help="Calibration: bucket trades by |edge| and show win% per bucket. "
+                   "Win% should rise with edge magnitude if the model has signal.")
+@click.option("--by-side", is_flag=True,
+              help="Side bias: YES vs NO win rates. Persistent skew suggests "
+                   "routing or pricing asymmetry, not random variance.")
+@click.option("--by-vol", is_flag=True,
+              help="Bucket by realized vol at decision. Helps spot regimes "
+                   "where the lognormal estimator is over- or under-confident.")
+def quant_stats(
+    asset: str | None,
+    by_duration: bool,
+    by_asset: bool,
+    by_edge: bool,
+    by_side: bool,
+    by_vol: bool,
+) -> None:
     """Paper-trading performance of the quant short-horizon subsystem."""
     console = Console()
     settings = Settings.from_env()
@@ -160,6 +263,54 @@ def quant_stats(asset: str | None, by_duration: bool, by_asset: bool) -> None:
                 title=title,
                 key_col="Window",
                 key_fmt=lambda r: _fmt_duration(int(r["window_duration_s"])),
+            )
+            return
+
+        if by_edge:
+            with db.cursor() as cur:
+                cur.execute(STATS_QUERY_BY_EDGE, {"asset": asset})
+                rows = cur.fetchall()
+            title = (
+                f"Quant Up/Down Calibration by |Edge| ({asset})"
+                if asset else "Quant Up/Down Calibration by |Edge|"
+            )
+            _render_breakdown(
+                console, rows,
+                title=title,
+                key_col="|Edge|",
+                key_fmt=lambda r: r["edge_bucket"],
+            )
+            return
+
+        if by_side:
+            with db.cursor() as cur:
+                cur.execute(STATS_QUERY_BY_SIDE, {"asset": asset})
+                rows = cur.fetchall()
+            title = (
+                f"Quant Up/Down Performance by Side ({asset})"
+                if asset else "Quant Up/Down Performance by Side"
+            )
+            _render_breakdown(
+                console, rows,
+                title=title,
+                key_col="Side",
+                key_fmt=lambda r: r["side"],
+            )
+            return
+
+        if by_vol:
+            with db.cursor() as cur:
+                cur.execute(STATS_QUERY_BY_VOL, {"asset": asset})
+                rows = cur.fetchall()
+            title = (
+                f"Quant Up/Down Performance by Vol Regime ({asset})"
+                if asset else "Quant Up/Down Performance by Vol Regime"
+            )
+            _render_breakdown(
+                console, rows,
+                title=title,
+                key_col="Vol",
+                key_fmt=lambda r: r["vol_bucket"],
             )
             return
 
