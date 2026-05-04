@@ -71,6 +71,9 @@ class MarketData:
         question: Human-readable market question.
         category: Market category (e.g. crypto, politics).
         token_id: Outcome token identifier for the YES side.
+        token_id_no: Outcome token identifier for the NO side. Required to
+            place long-NO orders (executor SELL); empty when the upstream
+            parser couldn't pair the outcome labels.
         midpoint_price: Current mid price between best bid and ask.
         bids_depth: Total USD available on the bid side.
         asks_depth: Total USD available on the ask side.
@@ -88,6 +91,7 @@ class MarketData:
     hours_to_resolution: float
     volume_24h: Decimal
     market_class: MarketClass | None = None
+    token_id_no: str = ""
 
     @property
     def min_depth(self) -> Decimal:

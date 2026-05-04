@@ -60,6 +60,37 @@ class TestPolymarketClient:
         raw = dict(_GAMMA_RAW, clobTokenIds=json.dumps([]))
         assert self.client.parse_market(raw) is None
 
+    def test_parse_market_pairs_yes_no_by_label(self):
+        """Gamma can return outcomes in either order; pair by label, not index."""
+        raw = dict(
+            _GAMMA_RAW,
+            outcomes=json.dumps(["Yes", "No"]),
+            clobTokenIds=json.dumps(["tok_yes", "tok_no"]),
+        )
+        market = self.client.parse_market(raw)
+        assert market is not None
+        assert market.token_id == "tok_yes"
+        assert market.token_id_no == "tok_no"
+
+    def test_parse_market_handles_reversed_outcome_order(self):
+        raw = dict(
+            _GAMMA_RAW,
+            outcomes=json.dumps(["No", "Yes"]),
+            clobTokenIds=json.dumps(["tok_no", "tok_yes"]),
+        )
+        market = self.client.parse_market(raw)
+        assert market is not None
+        assert market.token_id == "tok_yes"
+        assert market.token_id_no == "tok_no"
+
+    def test_parse_market_leaves_no_token_empty_when_outcomes_missing(self):
+        """Without label info we keep YES at index 0 (legacy behavior) and
+        leave token_id_no empty so SELL trades fail loud."""
+        market = self.client.parse_market(_GAMMA_RAW)
+        assert market is not None
+        assert market.token_id == "tok_yes"
+        assert market.token_id_no == ""
+
 
 class TestFetchMarketState:
     def setup_method(self):

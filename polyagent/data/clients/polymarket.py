@@ -24,6 +24,35 @@ _GAMMA_BASE = "https://gamma-api.polymarket.com"
 # non-binary and pinned to a 0 midpoint by fetch_market_state, matching
 # pre-existing behavior.
 _YES_OUTCOME_LABELS = frozenset({"yes", "up"})
+_NO_OUTCOME_LABELS = frozenset({"no", "down"})
+
+
+def _pair_yes_no_tokens(
+    outcomes: list, token_ids: list,
+) -> tuple[str, str] | None:
+    """Pair (yes_token_id, no_token_id) by outcome label.
+
+    Polymarket's Gamma API pairs ``outcomes`` to ``clobTokenIds`` by index
+    but does not guarantee a fixed YES-first order. Pairing by label avoids
+    a silent flip that would route every long-NO trade onto the wrong token.
+    """
+    if not isinstance(outcomes, list) or not isinstance(token_ids, list):
+        return None
+    if len(outcomes) != 2 or len(token_ids) != 2:
+        return None
+    yes_idx = next(
+        (i for i, o in enumerate(outcomes)
+         if str(o).strip().lower() in _YES_OUTCOME_LABELS),
+        None,
+    )
+    no_idx = next(
+        (i for i, o in enumerate(outcomes)
+         if str(o).strip().lower() in _NO_OUTCOME_LABELS),
+        None,
+    )
+    if yes_idx is None or no_idx is None or yes_idx == no_idx:
+        return None
+    return token_ids[yes_idx], token_ids[no_idx]
 
 
 class PolymarketClient:
@@ -94,6 +123,19 @@ class PolymarketClient:
             return None
 
         try:
+            outcomes: list = json.loads(raw.get("outcomes") or "[]")
+        except (json.JSONDecodeError, TypeError):
+            outcomes = []
+        paired = _pair_yes_no_tokens(outcomes, token_ids)
+        if paired is not None:
+            yes_token_id, no_token_id = paired
+        else:
+            # Pre-existing behavior: assume index 0 is YES when labels are
+            # absent (e.g. categorical markets). NO id stays empty so SELL
+            # orders fail loud rather than route onto the wrong token.
+            yes_token_id, no_token_id = token_ids[0], ""
+
+        try:
             prices: list[str] = json.loads(raw.get("outcomePrices") or "[]")
             yes_price = float(prices[0]) if prices else 0.5
         except (json.JSONDecodeError, TypeError, IndexError, ValueError):
@@ -112,7 +154,8 @@ class PolymarketClient:
             polymarket_id=condition_id,
             question=raw.get("question", ""),
             category=raw.get("category", "unknown"),
-            token_id=token_ids[0],
+            token_id=yes_token_id,
+            token_id_no=no_token_id,
             midpoint_price=Decimal(str(round(yes_price, 4))),
             bids_depth=volume_24h,
             asks_depth=volume_24h,

@@ -255,10 +255,30 @@ class ExecutorService:
         if plan is None:
             return None
 
+        # Route long-NO entries (plan.side == SELL) to a BUY of the NO token
+        # at NO price. The internal vote/sizing layer talks YES coordinates;
+        # the wire-level order has to target the actual outcome token. Storing
+        # the position with side=SELL and entry_price in YES coords keeps
+        # exit_monitor and CLI outputs uniform across both directions.
+        if plan.side == PositionSide.SELL:
+            if not market.token_id_no:
+                logger.error(
+                    "LIVE SELL FAILED — no NO token id for market %s",
+                    thesis.market_id,
+                )
+                return None
+            order_token_id = market.token_id_no
+            order_side = "BUY"
+            order_price = round(1.0 - float(plan.market_price), 4)
+        else:
+            order_token_id = market.token_id
+            order_side = plan.side.value
+            order_price = float(plan.market_price)
+
         result = polymarket_client.place_order(
-            token_id=market.token_id,
-            side=plan.side.value,
-            price=float(plan.market_price),
+            token_id=order_token_id,
+            side=order_side,
+            price=order_price,
             size=float(plan.position_size),
         )
 
@@ -279,7 +299,14 @@ class ExecutorService:
                 )
             return None
 
-        fill_price = _extract_fill_price(result.get("response"), plan.market_price)
+        # The CLOB returns the fill on the token we ordered. For SELL the
+        # response price is in NO coords; convert back to YES coords so the
+        # stored entry_price stays uniform across sides.
+        raw_fill = _extract_fill_price(result.get("response"), Decimal(str(order_price)))
+        if plan.side == PositionSide.SELL:
+            fill_price = (Decimal("1") - raw_fill).quantize(Decimal("0.0001"))
+        else:
+            fill_price = raw_fill
 
         position = Position.open_live(
             thesis_id=thesis.id,

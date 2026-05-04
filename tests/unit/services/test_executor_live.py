@@ -14,13 +14,14 @@ from polyagent.models import (
 from polyagent.services.executor import ExecutorService
 
 
-def _market() -> MarketData:
+def _market(midpoint: str = "0.65", with_no_token: bool = True) -> MarketData:
     return MarketData(
         polymarket_id="0xabc",
         question="Will X happen?",
         category="crypto",
-        token_id="tok_1",
-        midpoint_price=Decimal("0.65"),
+        token_id="tok_yes",
+        token_id_no="tok_no" if with_no_token else "",
+        midpoint_price=Decimal(midpoint),
         bids_depth=Decimal("1000"),
         asks_depth=Decimal("1000"),
         hours_to_resolution=48.0,
@@ -132,3 +133,76 @@ class TestExecuteLive:
         assert position is not None
         assert position.paper_trade is True
         assert position.volume_at_entry == Decimal("9000")
+
+
+class TestSellRoutesToBuyNo:
+    """Long-NO entries (plan.side == SELL) must place a BUY on the NO token
+    at NO price; the kelly_size + sizing layer treats them as buys of NO."""
+
+    def setup_method(self):
+        self.executor = ExecutorService(
+            kelly_max_fraction=0.25, bankroll=800.0, paper_trade=False,
+        )
+
+    def _sell_votes(self) -> list[Vote]:
+        return [
+            Vote(action=VoteAction.SELL, confidence=0.8, reason="fade"),
+            Vote(action=VoteAction.SELL, confidence=0.7, reason="fade"),
+            Vote(action=VoteAction.HOLD, confidence=0.3, reason="hold"),
+        ]
+
+    def test_sell_targets_no_token_with_buy_side(self):
+        client = MagicMock()
+        client.place_order.return_value = {
+            "ok": True,
+            "request": {},
+            "response": {"order_id": "o2"},
+        }
+        market = _market(midpoint="0.40")  # NO price = 0.60
+
+        position = self.executor.execute_live(
+            thesis=_thesis(estimate=0.10),
+            votes=self._sell_votes(),
+            market=market,
+            polymarket_client=client,
+        )
+        assert position is not None
+        assert position.side == PositionSide.SELL
+        kwargs = client.place_order.call_args.kwargs
+        assert kwargs["token_id"] == "tok_no"
+        assert kwargs["side"] == "BUY"
+        # 1 - 0.40 = 0.60 (rounded to 4dp)
+        assert kwargs["price"] == 0.60
+
+    def test_sell_skips_when_no_token_missing(self):
+        client = MagicMock()
+        market = _market(midpoint="0.40", with_no_token=False)
+
+        position = self.executor.execute_live(
+            thesis=_thesis(estimate=0.10),
+            votes=self._sell_votes(),
+            market=market,
+            polymarket_client=client,
+        )
+        assert position is None
+        client.place_order.assert_not_called()
+
+    def test_sell_fill_price_stored_in_yes_coords(self):
+        """The CLOB returns a NO-coord fill; entry_price must be YES coord."""
+        client = MagicMock()
+        client.place_order.return_value = {
+            "ok": True,
+            "request": {},
+            # Filled at NO=0.62 → YES coord = 1 - 0.62 = 0.38.
+            "response": {"order_id": "o3", "price": 0.62},
+        }
+        market = _market(midpoint="0.40")
+
+        position = self.executor.execute_live(
+            thesis=_thesis(estimate=0.10),
+            votes=self._sell_votes(),
+            market=market,
+            polymarket_client=client,
+        )
+        assert position is not None
+        assert position.entry_price == Decimal("0.3800")
