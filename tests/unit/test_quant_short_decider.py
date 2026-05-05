@@ -492,14 +492,14 @@ class TestBankrollIntegration:
         # spot=60000 vs start_spot=59000: p_up ≈ 1.0, mid = 0.31, so
         # edge ≈ 0.69. raw_kelly = 0.69 × 0.25 × 4.00 = 0.69. Cap=5,
         # headroom = 4 - 1 = 3. min(0.69, 5, 3) = 0.69.
-        # Integer-contract floor at fill=0.32: floor(0.69/0.32)=2 contracts
-        # → 2 × 0.32 = 0.64.
+        # Ceil to whole contracts at fill=0.32: ceil(0.69/0.32)=3
+        # contracts → 3 × 0.32 = 0.96. Headroom $3 covers it.
         repo = _FakeRepo()
         d = self._decider_with_bankroll(repo, free="4.00", max_size="5",
                                         kelly_max_fraction=0.25)
         d.evaluate(_row())
         assert len(repo.inserted) == 1
-        assert repo.inserted[0].size == Decimal("0.64")
+        assert repo.inserted[0].size == Decimal("0.96")
 
     def test_kelly_size_caps_at_position_size_when_bankroll_large(self):
         repo = _FakeRepo()
@@ -507,9 +507,11 @@ class TestBankrollIntegration:
                                         kelly_max_fraction=0.25)
         d.evaluate(_row())
         assert len(repo.inserted) == 1
-        # raw = |edge| × 0.25 × 200 = 50; capped at 5. Integer contracts
-        # at fill=0.32: floor(5/0.32)=15 contracts → 15 × 0.32 = 4.80.
-        assert repo.inserted[0].size == Decimal("4.80")
+        # raw = |edge| × 0.25 × 200 = 50; capped at 5. Ceil to whole
+        # contracts at fill=0.32: ceil(5/0.32)=16 contracts → 16 × 0.32
+        # = 5.12. Per-trade cap can be exceeded by up to one contract
+        # because we round up; headroom is the hard cap.
+        assert repo.inserted[0].size == Decimal("5.12")
 
     def test_kelly_respects_headroom(self):
         # Free = $1.50, floor = $1.00. Headroom = 0.50. With a max-Kelly
@@ -603,9 +605,11 @@ class TestBankrollIntegration:
 
     def test_no_bankroll_provider_keeps_legacy_fixed_size(self):
         """Backward-compat: tests and non-wired call sites size off the
-        fixed position_size_usd, no Kelly scaling, no floor — but still
-        flooring to whole contracts (Polymarket only fills integer lots).
-        At fill=0.32: floor(5/0.32)=15 contracts → 15 × 0.32 = 4.80."""
+        fixed position_size_usd, no Kelly scaling, no headroom check, but
+        still rounding to whole contracts (Polymarket only fills integer
+        lots). At fill=0.32: ceil(5/0.32)=16 contracts → 16 × 0.32 = 5.12.
+        Slight overshoot of position_size cap is the symmetric trade-off
+        for eliminating the YES/NO sizing cliff."""
         repo = _FakeRepo()
         d = QuantDecider(
             sources={"BTC": _FakeSrc(Decimal("60000"))},
@@ -615,7 +619,7 @@ class TestBankrollIntegration:
         )
         d.evaluate(_row())
         assert len(repo.inserted) == 1
-        assert repo.inserted[0].size == Decimal("4.80")
+        assert repo.inserted[0].size == Decimal("5.12")
 
 
 class TestQuantDeciderHotReload:
@@ -676,3 +680,62 @@ class TestQuantDeciderHotReload:
         assert d._min_free_bankroll == Decimal("2")
         assert d._min_order_size == Decimal("3")
         assert d._min_contracts == 4
+
+
+class TestSizingSymmetryAcrossFillCliff:
+    """Regression: the old `min_order_size` flat-$1 bump combined with
+    `int()` integer-contract flooring created a stake cliff at every
+    fill that divides $1 evenly (0.50, 0.33, 0.25...). For a fill of
+    0.500 the formula produced $1.00 (2 contracts); for fill 0.510 it
+    produced $0.51 (1 contract). Because YES bids cluster at exactly
+    0.50 in balanced binary markets and YES asks sit a tick above,
+    NO trades landed on the favourable side of the cliff far more often
+    than YES, inflating NO stake by ~30%. After the ceil-to-contract
+    sizing change, fills on either side of any clean divisor must
+    produce stakes within one contract of each other.
+    """
+
+    def _decider_at_fill(self, repo, fill_dec: str):
+        # Reproduce the production sizing config: free bankroll low enough
+        # that Kelly lands below the $1 min_order_size floor, which is
+        # exactly the regime where the old bump-to-$1 + int()-flooring
+        # combo created the cliff. Spot=60000 vs start_spot=59000 gives a
+        # strong positive p_up, so edge is positive and side=YES with
+        # fill=ask.
+        bk = BankrollState(
+            starting=Decimal("20"),
+            realized_main=Decimal("0"),
+            realized_quant=Decimal("0"),
+            open_capital_main=Decimal("0"),
+            open_capital_quant=Decimal("15"),  # free = 5
+        )
+        return QuantDecider(
+            sources={"BTC": _FakeSrc(Decimal("60000"))},
+            book=_FakeBook((Decimal(fill_dec), Decimal(fill_dec))),
+            repo=repo,
+            position_size_usd=Decimal("5"),
+            settlements={"BTC": _FakeSettlement(Decimal("59000"))},
+            bankroll_provider=lambda: bk,
+            kelly_max_fraction=0.25,
+            min_free_bankroll=Decimal("1.0"),
+            min_order_size=Decimal("1.0"),  # production value
+        )
+
+    def test_fill_0_50_and_0_51_produce_same_contract_count(self):
+        # A 0.001 fill change should not flip the contract count by 2x.
+        # Old behaviour: fill=0.500 → 2 contracts; fill=0.510 → 1 contract.
+        # New behaviour: both fills round to the same contract count.
+        repo50 = _FakeRepo()
+        self._decider_at_fill(repo50, "0.50").evaluate(_row())
+        repo51 = _FakeRepo()
+        self._decider_at_fill(repo51, "0.51").evaluate(_row())
+        assert len(repo50.inserted) == 1
+        assert len(repo51.inserted) == 1
+        size50, fill50 = repo50.inserted[0].size, repo50.inserted[0].fill_price_assumed
+        size51, fill51 = repo51.inserted[0].size, repo51.inserted[0].fill_price_assumed
+        contracts50 = int((size50 / fill50).to_integral_value())
+        contracts51 = int((size51 / fill51).to_integral_value())
+        assert contracts50 == contracts51, (
+            f"cliff still present: fill=0.50 -> {contracts50} ctrs (${size50}), "
+            f"fill=0.51 -> {contracts51} ctrs (${size51})"
+        )

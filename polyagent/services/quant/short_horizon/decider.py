@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
-from decimal import Decimal
+from decimal import Decimal, ROUND_CEILING
 from typing import Callable, Optional, Protocol
 
 from polyagent.models import QuantShortTrade
@@ -335,19 +335,6 @@ class QuantDecider:
                            kelly=f"{kelly_dollars:.4f}",
                            note="size_under_one_cent")
             return None
-        if self._min_order_size > Decimal("0") and size < self._min_order_size:
-            if headroom >= self._min_order_size:
-                logger.info(
-                    "BUMP %s — Kelly=$%.2f below min=$%.2f, bumping (headroom=$%.2f)",
-                    slug, size, self._min_order_size, headroom,
-                )
-                size = self._min_order_size
-            else:
-                self._log_skip(slug, "min_order_size",
-                               kelly=f"{size:.2f}",
-                               min=f"{self._min_order_size:.2f}",
-                               headroom=f"{headroom:.2f}")
-                return None
         return self._enforce_integer_contracts(size, fill, slug, headroom=headroom)
 
     def _enforce_integer_contracts(
@@ -357,21 +344,35 @@ class QuantDecider:
         slug: str,
         headroom: Decimal | None,
     ) -> Decimal | None:
-        """Floor USD notional to a whole-contract amount; skip if 1 won't fit.
+        """Round USD notional UP to a whole-contract amount.
 
-        Polymarket only fills integer-contract orders. ``headroom=None``
-        marks the legacy fixed-size path (no bankroll provider) where
-        unbounded headroom is assumed.
+        Polymarket only fills integer-contract orders. We ceil rather
+        than floor so YES/NO sizing is symmetric across the order-book
+        bid/ask asymmetry. (The previous floor + flat-$1 bump created a
+        cliff at every clean divisor of $1: at fill=0.500 the bump-then-
+        floor pipeline produced 2 contracts; at fill=0.501 it produced
+        1, halving the stake. Because YES bids park at exactly 0.500 in
+        balanced binary markets and YES asks sit a tick above, NO trades
+        landed on the favourable side of the cliff far more often, which
+        showed up as a 32% NO stake premium with no Kelly justification.)
+
+        When the ceil overshoots the headroom, fall back to the largest
+        whole-contract amount that fits. ``headroom=None`` is the legacy
+        no-bankroll-provider path and assumes unbounded headroom.
         """
         if fill <= 0:
             self._log_skip(slug, "degenerate_fill", fill=f"{fill}")
             return None
-        contracts = int(size / fill)
-        if contracts < self._min_contracts:
-            min_notional = Decimal(self._min_contracts) * fill
-            if headroom is None or headroom >= min_notional:
-                contracts = self._min_contracts
-            else:
+        contracts = int((size / fill).to_integral_value(rounding=ROUND_CEILING))
+        contracts = max(contracts, self._min_contracts)
+        notional = Decimal(contracts) * fill
+        if headroom is not None and notional > headroom:
+            # Ceiling overshoots the bankroll floor; fall back to floor
+            # against the headroom (strict cap). If even min_contracts
+            # cannot fit, skip.
+            contracts = int(headroom / fill)
+            if contracts < self._min_contracts:
+                min_notional = Decimal(self._min_contracts) * fill
                 self._log_skip(slug, "below_min_contracts",
                                size=f"{size:.4f}",
                                fill=f"{fill:.4f}",
@@ -379,7 +380,8 @@ class QuantDecider:
                                need=f"{min_notional:.4f}",
                                headroom=f"{headroom:.2f}")
                 return None
-        return (Decimal(contracts) * fill).quantize(Decimal("0.01"))
+            notional = Decimal(contracts) * fill
+        return notional.quantize(Decimal("0.01"))
 
     @staticmethod
     def _log_skip(slug: str, reason: str, **fields) -> None:
