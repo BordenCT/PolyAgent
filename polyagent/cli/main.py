@@ -11,6 +11,7 @@ from polyagent.cli.markets import markets, thesis
 from polyagent.cli.migrate_cmd import migrate
 from polyagent.cli.performance import perf
 from polyagent.cli.positions import positions
+from polyagent.cli.quant_backfill_pnl import quant_backfill_pnl
 from polyagent.cli.quant_reresolve import quant_reresolve
 from polyagent.cli.quant_stats import quant_stats
 from polyagent.cli.quant_validate import quant_validate
@@ -47,6 +48,7 @@ cli.add_command(reset)
 cli.add_command(quant_stats)
 cli.add_command(quant_validate)
 cli.add_command(quant_reresolve)
+cli.add_command(quant_backfill_pnl)
 cli.add_command(class_stats)
 cli.add_command(buy_review)
 cli.add_command(thesis_stats)
