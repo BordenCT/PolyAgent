@@ -97,7 +97,6 @@ class QuantDecider:
         bankroll_provider: Optional[Callable[[], BankrollState]] = None,
         kelly_max_fraction: float = 0.25,
         min_free_bankroll: Decimal = Decimal("1.0"),
-        min_order_size: Decimal = Decimal("0.0"),
         min_contracts: int = 1,
     ) -> None:
         self._sources = sources
@@ -111,7 +110,6 @@ class QuantDecider:
         self._bankroll_provider = bankroll_provider
         self._kelly_max_fraction = float(kelly_max_fraction)
         self._min_free_bankroll = Decimal(str(min_free_bankroll))
-        self._min_order_size = Decimal(str(min_order_size))
         self._min_contracts = max(1, int(min_contracts))
 
     def update_thresholds(
@@ -121,7 +119,6 @@ class QuantDecider:
         max_open_per_asset: int | None = None,
         kelly_max_fraction: float | None = None,
         min_free_bankroll: Decimal | None = None,
-        min_order_size: Decimal | None = None,
         min_contracts: int | None = None,
     ) -> None:
         """Hot-reload sizing/cap knobs from a fresh .env without restart.
@@ -139,8 +136,6 @@ class QuantDecider:
             self._kelly_max_fraction = float(kelly_max_fraction)
         if min_free_bankroll is not None:
             self._min_free_bankroll = Decimal(str(min_free_bankroll))
-        if min_order_size is not None:
-            self._min_order_size = Decimal(str(min_order_size))
         if min_contracts is not None:
             self._min_contracts = max(1, int(min_contracts))
 
@@ -262,12 +257,17 @@ class QuantDecider:
                            mid=f"{mid:.4f}")
             return
 
-        # Determine side and fill before sizing so that integer-contract
-        # enforcement can use the actual per-contract cost.
+        # Determine side and per-contract fill price. For YES we buy the
+        # YES token at its ask; for NO we buy the NO token at the NO ask
+        # (= 1 - YES_bid by no-arbitrage). Storing the actual price paid
+        # in the side's own coordinate system is what compute_pnl assumes,
+        # and what the brain executor already does (see services/executor.
+        # py:288). Previously this stored fill = YES_bid for NO trades,
+        # which silently understated NO stake AND broke the P&L formula.
         if edge > 0:
             side, fill = "YES", ask
         else:
-            side, fill = "NO", bid
+            side, fill = "NO", (Decimal("1") - bid)
 
         # Bankroll floor + Kelly sizing. Kept out of the early-gate block
         # so that fee-of-edge checks don't run when bankroll has decided

@@ -21,31 +21,35 @@ def _pm(midpoint: str, resolved: bool = True) -> dict:
 
 
 class TestMathSelfCheck:
+    # `size` is dollars staked. contracts = size / fill_price, win pays
+    # contracts × $1, loss is the full stake. So a YES @ $0.40 with $2
+    # stake holds 5 contracts; on YES win the payout is $5 and profit is
+    # $3 (= size × (1 - fill) / fill).
     def test_correct_yes_win_passes(self):
-        # YES at 0.40, outcome YES, size 5 -> +5*(1-0.40) = +3.00
-        v = validate_row(_row("YES", "0.40", "YES", "5", "3.00"), pm_state=None)
+        # YES at 0.40, size $2 stake, outcome YES -> 2*(1-0.4)/0.4 = +3.00
+        v = validate_row(_row("YES", "0.40", "YES", "2", "3.00"), pm_state=None)
         assert not v.math_mismatch
 
     def test_correct_no_win_passes(self):
-        # NO at 0.55, outcome NO, size 5 -> +5*(1-0.55) = +2.25
-        v = validate_row(_row("NO", "0.55", "NO", "5", "2.25"), pm_state=None)
+        # NO at 0.50, size $5 stake, outcome NO -> 5*(1-0.5)/0.5 = +5.00
+        v = validate_row(_row("NO", "0.50", "NO", "5", "5.00"), pm_state=None)
         assert not v.math_mismatch
 
     def test_correct_loss_passes(self):
-        # YES at 0.45, outcome NO, size 5 -> -5*0.45 = -2.25
-        v = validate_row(_row("YES", "0.45", "NO", "5", "-2.25"), pm_state=None)
+        # YES at 0.45, size $5 stake, outcome NO -> -5 (full stake lost)
+        v = validate_row(_row("YES", "0.45", "NO", "5", "-5.00"), pm_state=None)
         assert not v.math_mismatch
 
     def test_corrupt_pnl_caught(self):
         # Stored pnl says +$10 but math says +$3. Catch it.
-        v = validate_row(_row("YES", "0.40", "YES", "5", "10.00"), pm_state=None)
+        v = validate_row(_row("YES", "0.40", "YES", "2", "10.00"), pm_state=None)
         assert v.math_mismatch
 
 
 class TestPolymarketCrossCheck:
     def test_pm_agrees_no_mismatch(self):
         v = validate_row(
-            _row("YES", "0.40", "YES", "5", "3.00"),
+            _row("YES", "0.40", "YES", "2", "3.00"),
             pm_state=_pm("1"),
         )
         assert not v.math_mismatch
@@ -53,20 +57,21 @@ class TestPolymarketCrossCheck:
         assert v.pm_outcome == "YES"
 
     def test_pm_disagrees_flips_corrected_pnl(self):
-        # We marked outcome YES (claimed +3.00 win); PM settled NO (-2.00 loss).
+        # We marked outcome YES (claimed +3.00 win); PM settled NO (-2.00 loss
+        # since stake = $2).
         v = validate_row(
-            _row("YES", "0.40", "YES", "5", "3.00"),
+            _row("YES", "0.40", "YES", "2", "3.00"),
             pm_state=_pm("0"),
         )
         assert not v.math_mismatch  # math is internally consistent
         assert v.pm_mismatch        # but PM says we lost
         assert v.pm_outcome == "NO"
-        assert v.corrected_pnl == Decimal("-2.00")
+        assert v.corrected_pnl == Decimal("-2")
         assert v.recorded_pnl == Decimal("3.00")
 
     def test_pm_unresolved_no_verdict(self):
         v = validate_row(
-            _row("YES", "0.40", "YES", "5", "3.00"),
+            _row("YES", "0.40", "YES", "2", "3.00"),
             pm_state=_pm("1", resolved=False),
         )
         assert v.pm_outcome is None
@@ -74,7 +79,7 @@ class TestPolymarketCrossCheck:
         assert v.corrected_pnl is None
 
     def test_pm_state_none_no_verdict(self):
-        v = validate_row(_row("YES", "0.40", "YES", "5", "3.00"), pm_state=None)
+        v = validate_row(_row("YES", "0.40", "YES", "2", "3.00"), pm_state=None)
         assert v.pm_outcome is None
         assert not v.pm_mismatch
         assert v.corrected_pnl is None

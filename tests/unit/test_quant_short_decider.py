@@ -669,7 +669,6 @@ class TestQuantDeciderHotReload:
             max_open_per_asset=2,
             kelly_max_fraction=0.20,
             min_free_bankroll=Decimal("2"),
-            min_order_size=Decimal("3"),
             min_contracts=4,
         )
         d.update_thresholds(position_size_usd=Decimal("9"))
@@ -678,7 +677,6 @@ class TestQuantDeciderHotReload:
         assert d._max_open_per_asset == 2
         assert d._kelly_max_fraction == 0.20
         assert d._min_free_bankroll == Decimal("2")
-        assert d._min_order_size == Decimal("3")
         assert d._min_contracts == 4
 
 
@@ -696,12 +694,11 @@ class TestSizingSymmetryAcrossFillCliff:
     """
 
     def _decider_at_fill(self, repo, fill_dec: str):
-        # Reproduce the production sizing config: free bankroll low enough
-        # that Kelly lands below the $1 min_order_size floor, which is
-        # exactly the regime where the old bump-to-$1 + int()-flooring
-        # combo created the cliff. Spot=60000 vs start_spot=59000 gives a
-        # strong positive p_up, so edge is positive and side=YES with
-        # fill=ask.
+        # Reproduce a sizing regime where Kelly lands below one whole
+        # contract worth of stake — exactly where the old bump-to-$1 +
+        # int()-flooring combo created the cliff. Spot=60000 vs
+        # start_spot=59000 gives a strong positive p_up, so edge is
+        # positive and side=YES with fill=ask.
         bk = BankrollState(
             starting=Decimal("20"),
             realized_main=Decimal("0"),
@@ -718,7 +715,6 @@ class TestSizingSymmetryAcrossFillCliff:
             bankroll_provider=lambda: bk,
             kelly_max_fraction=0.25,
             min_free_bankroll=Decimal("1.0"),
-            min_order_size=Decimal("1.0"),  # production value
         )
 
     def test_fill_0_50_and_0_51_produce_same_contract_count(self):

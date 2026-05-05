@@ -156,7 +156,6 @@ def run() -> None:
         bankroll=settings.bankroll,
         paper_trade=settings.paper_trade,
         min_free_bankroll=settings.min_free_bankroll,
-        min_order_size=settings.min_order_size,
         min_contracts=settings.min_contracts,
     )
     exit_monitor = ExitMonitorService(
@@ -434,7 +433,6 @@ def run() -> None:
             bankroll_provider=lambda: compute_bankroll_state(db, settings.bankroll),
             kelly_max_fraction=settings.kelly_max_fraction,
             min_free_bankroll=Decimal(str(settings.min_free_bankroll)),
-            min_order_size=Decimal(str(settings.min_order_size)),
             min_contracts=settings.min_contracts,
         )
         quant_resolver = QuantResolver(
@@ -520,7 +518,7 @@ def run() -> None:
         "max_price", "scanner_question_blocklist",
         "brain_confidence_threshold", "brain_min_checks", "brain_min_edge",
         "kelly_max_fraction", "bankroll", "min_free_bankroll",
-        "min_order_size", "min_contracts",
+        "min_contracts",
         "exit_target_pct", "exit_volume_multiplier", "exit_stale_hours",
         "exit_stale_threshold", "exit_poll_delay",
         "quant_position_size_usd", "quant_max_trades_per_cycle",
@@ -582,7 +580,6 @@ def run() -> None:
             kelly_max_fraction=new_settings.kelly_max_fraction,
             bankroll=new_settings.bankroll,
             min_free_bankroll=new_settings.min_free_bankroll,
-            min_order_size=new_settings.min_order_size,
             min_contracts=new_settings.min_contracts,
         )
         exit_monitor.update_thresholds(
@@ -598,7 +595,6 @@ def run() -> None:
                 max_open_per_asset=new_settings.quant_max_open_per_asset,
                 kelly_max_fraction=new_settings.kelly_max_fraction,
                 min_free_bankroll=Decimal(str(new_settings.min_free_bankroll)),
-                min_order_size=Decimal(str(new_settings.min_order_size)),
                 min_contracts=new_settings.min_contracts,
             )
         settings = new_settings

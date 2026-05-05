@@ -290,11 +290,10 @@ class TestExecutorHotReload:
         else keeps its prior value."""
         ex = ExecutorService(
             kelly_max_fraction=0.25, bankroll=800.0,
-            min_free_bankroll=1.0, min_order_size=2.0, min_contracts=3,
+            min_free_bankroll=1.0, min_contracts=3,
         )
         ex.update_thresholds(kelly_max_fraction=0.10)
         assert ex._kelly_max_fraction == 0.10
         assert ex._bankroll == 800.0
         assert ex._min_free_bankroll == 1.0
-        assert ex._min_order_size == 2.0
         assert ex._min_contracts == 3

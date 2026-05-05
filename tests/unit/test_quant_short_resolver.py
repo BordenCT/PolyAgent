@@ -89,8 +89,9 @@ class TestPolymarketTruth:
         assert r.resolve_due_markets() == 1
         assert repo.resolved[0]["outcome"] == "YES"
         assert repo.resolved[0]["price_source_id"] == "polymarket:clob"
-        # YES side at 0.40 with YES outcome: 5 * (1 - 0.40) = 3.00
-        assert repo.pnls["t1"] == Decimal("3.00")
+        # YES @ 0.40 with $5 stake = 12.5 contracts; YES outcome pays $12.50
+        # → +$7.50 profit (= 5 × (1-0.40)/0.40).
+        assert repo.pnls["t1"] == Decimal("7.5")
 
     def test_no_outcome_from_pm(self):
         m, _, _ = _market()
@@ -99,8 +100,8 @@ class TestPolymarketTruth:
         r = QuantResolver(repo=repo, client=client, settlements={})
         assert r.resolve_due_markets() == 1
         assert repo.resolved[0]["outcome"] == "NO"
-        # YES side at 0.40 with NO outcome: -5 * 0.40 = -2.00
-        assert repo.pnls["t1"] == Decimal("-2.00")
+        # YES side with NO outcome: stake fully lost = -$5.
+        assert repo.pnls["t1"] == Decimal("-5")
 
     def test_pm_unresolved_defers(self):
         m, _, _ = _market()
@@ -177,9 +178,9 @@ class TestPolymarketTruth:
         r = QuantResolver(repo=repo, client=client, settlements=settlements)
         r.resolve_due_markets()
         assert repo.resolved[0]["outcome"] == "NO"
-        # YES side at 0.40 with NO: -5 * 0.40 = -2.00 (not the +3.00 the
-        # old end_spot >= start_spot rule would have produced).
-        assert repo.pnls["t1"] == Decimal("-2.00")
+        # YES side with NO outcome: stake fully lost = -$5.
+        # (The old end_spot >= start_spot rule would have produced +$7.50.)
+        assert repo.pnls["t1"] == Decimal("-5")
 
     def test_market_without_polymarket_id_is_skipped(self):
         m, _, _ = _market(pm_id="")
@@ -208,5 +209,5 @@ class TestPolymarketTruth:
         r = QuantResolver(repo=repo, client=client, settlements={})
         r.resolve_due_markets()
         assert "t-old" not in repo.pnls
-        # NO side at 0.55 with YES outcome: -5 * 0.55 = -2.75
-        assert repo.pnls["t-new"] == Decimal("-2.75")
+        # NO side with YES outcome: stake fully lost = -$5.
+        assert repo.pnls["t-new"] == Decimal("-5")

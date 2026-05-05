@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import TYPE_CHECKING
@@ -43,14 +44,12 @@ class ExecutorService:
         bankroll: float = 800.0,
         paper_trade: bool = True,
         min_free_bankroll: float = 0.0,
-        min_order_size: float = 0.0,
         min_contracts: int = 1,
     ) -> None:
         self._kelly_max_fraction = kelly_max_fraction
         self._bankroll = bankroll
         self._paper_trade = paper_trade
         self._min_free_bankroll = min_free_bankroll
-        self._min_order_size = min_order_size
         self._min_contracts = max(1, int(min_contracts))
 
     def update_thresholds(
@@ -58,7 +57,6 @@ class ExecutorService:
         kelly_max_fraction: float | None = None,
         bankroll: float | None = None,
         min_free_bankroll: float | None = None,
-        min_order_size: float | None = None,
         min_contracts: int | None = None,
     ) -> None:
         """Hot-reload sizing knobs from a fresh .env without restart.
@@ -75,8 +73,6 @@ class ExecutorService:
             self._bankroll = bankroll
         if min_free_bankroll is not None:
             self._min_free_bankroll = min_free_bankroll
-        if min_order_size is not None:
-            self._min_order_size = min_order_size
         if min_contracts is not None:
             self._min_contracts = max(1, int(min_contracts))
 
@@ -180,23 +176,11 @@ class ExecutorService:
             logger.info("SKIP — Kelly says no edge for market %s", thesis.market_id)
             return None
 
-        if position_size < self._min_order_size:
-            if headroom >= self._min_order_size:
-                logger.info(
-                    "BUMP %s — Kelly=$%.2f below min=$%.2f, bumping (headroom=$%.2f)",
-                    thesis.market_id, position_size, self._min_order_size, headroom,
-                )
-                position_size = self._min_order_size
-            else:
-                logger.info(
-                    "SKIP %s — Kelly=$%.2f below min=$%.2f, headroom=$%.2f insufficient",
-                    thesis.market_id, position_size, self._min_order_size, headroom,
-                )
-                return None
-
-        # Polymarket trades whole contracts only. Floor USD notional to the
-        # nearest integer-contract amount and enforce the configured
-        # minimum-contracts floor; skip if even that minimum won't fit.
+        # Polymarket trades whole contracts only. Round UP to the nearest
+        # integer-contract amount (rather than the old floor + flat-$1
+        # bump), so YES/NO sizing stays symmetric across the order-book
+        # bid/ask asymmetry. See decider._enforce_integer_contracts for
+        # the full rationale on the cliff that the old logic created.
         contract_price = market_p if side == PositionSide.BUY else (1.0 - market_p)
         if contract_price <= 0:
             logger.info(
@@ -204,18 +188,19 @@ class ExecutorService:
                 thesis.market_id, contract_price,
             )
             return None
-        contracts = int(position_size / contract_price)
-        if contracts < self._min_contracts:
-            min_notional = self._min_contracts * contract_price
-            if headroom >= min_notional:
-                contracts = self._min_contracts
-            else:
+        contracts = max(math.ceil(position_size / contract_price), self._min_contracts)
+        position_size = round(contracts * contract_price, 2)
+        if position_size > headroom:
+            # Ceil overshoots headroom; fall back to floor against headroom.
+            contracts = int(headroom / contract_price)
+            if contracts < self._min_contracts:
+                min_notional = self._min_contracts * contract_price
                 logger.info(
                     "SKIP %s — below %d-contract minimum (price=$%.4f, headroom=$%.2f, need=$%.2f)",
                     thesis.market_id, self._min_contracts, contract_price, headroom, min_notional,
                 )
                 return None
-        position_size = round(contracts * contract_price, 2)
+            position_size = round(contracts * contract_price, 2)
 
         # Target price tracked in YES coordinates so exit_monitor and status work uniformly.
         # For SELL, the expected move is negative (YES price should fall toward estimate).
