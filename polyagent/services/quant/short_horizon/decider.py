@@ -43,6 +43,10 @@ class _RepoLike(Protocol):
     def insert_trade(self, trade) -> None: ...
     def count_open_trades_for_asset(self, asset_id: str) -> int: ...
     def set_start_spot(self, market_id: str, start_spot: Decimal) -> None: ...
+    # Optional analytics methods. Older test repos may not implement these;
+    # the decider checks via hasattr so legacy paths stay green.
+    def insert_rejection(self, **fields) -> None: ...
+    def count_recent_trades_for_asset(self, asset_id: str, seconds: int) -> int: ...
 
 
 class QuantDecider:
@@ -174,6 +178,7 @@ class QuantDecider:
 
         if self._opened_this_cycle >= self._max_per_cycle:
             self._log_skip(slug, "cycle_cap",
+                           market_row=market_row,
                            opened=self._opened_this_cycle,
                            limit=self._max_per_cycle)
             return
@@ -189,13 +194,14 @@ class QuantDecider:
         base_spec = get(asset_id)
         if base_spec is None:
             logger.warning("no spec for asset_id=%s, skipping market %s", asset_id, market_id)
-            self._log_skip(slug, "no_spec", asset=asset_id)
+            self._log_skip(slug, "no_spec", market_row=market_row, asset=asset_id)
             return
         spec = apply_env_overrides(base_spec)
 
         open_count = self._repo.count_open_trades_for_asset(asset_id)
         if open_count >= self._max_open_per_asset:
             self._log_skip(slug, "open_cap",
+                           market_row=market_row,
                            asset=asset_id,
                            open=open_count,
                            limit=self._max_open_per_asset)
@@ -203,11 +209,11 @@ class QuantDecider:
 
         source = self._sources.get(asset_id)
         if source is None:
-            self._log_skip(slug, "no_source", asset=asset_id)
+            self._log_skip(slug, "no_source", market_row=market_row, asset=asset_id)
             return
         spot = source.current()
         if spot is None:
-            self._log_skip(slug, "no_spot", asset=asset_id)
+            self._log_skip(slug, "no_spot", market_row=market_row, asset=asset_id)
             return
 
         window_start = market_row["window_start_ts"]
@@ -215,7 +221,8 @@ class QuantDecider:
         now = datetime.now(timezone.utc)
         ttm = (window_end - now).total_seconds()
         if ttm <= 0:
-            self._log_skip(slug, "window_closed", ttm=f"{ttm:.0f}")
+            self._log_skip(slug, "window_closed",
+                           market_row=market_row, ttm=f"{ttm:.0f}")
             return
         # Polymarket lists short-horizon markets hours before their windows
         # open. Without this guard the decider would enter on a market with
@@ -225,6 +232,7 @@ class QuantDecider:
         secs_until_open = (window_start - now).total_seconds()
         if secs_until_open > 0:
             self._log_skip(slug, "window_not_open",
+                           market_row=market_row,
                            minutes_until_open=f"{secs_until_open / 60:.1f}")
             return
 
@@ -243,7 +251,9 @@ class QuantDecider:
 
         book = self._book.fetch_mid(market_row["token_id_yes"])
         if book is None:
-            self._log_skip(slug, "no_book", token=market_row["token_id_yes"])
+            self._log_skip(slug, "no_book",
+                           market_row=market_row,
+                           token=market_row["token_id_yes"])
             return
         bid, ask = book
         mid = (float(bid) + float(ask)) / 2.0
@@ -251,10 +261,14 @@ class QuantDecider:
         edge = p_up - mid
         if abs(edge) < spec.edge_threshold:
             self._log_skip(slug, "edge_below_threshold",
+                           market_row=market_row,
+                           abs_edge=abs(edge),
+                           p_up=p_up,
+                           mid=mid,
+                           vol=vol,
+                           spot=spot,
                            edge=f"{edge:+.4f}",
-                           threshold=f"{spec.edge_threshold:.4f}",
-                           p_up=f"{p_up:.4f}",
-                           mid=f"{mid:.4f}")
+                           threshold=f"{spec.edge_threshold:.4f}")
             return
 
         # Determine side and per-contract fill price. For YES we buy the
@@ -283,9 +297,46 @@ class QuantDecider:
         fees_usd = size_fraction * spec.fee_bps / 10_000.0
         if gross_edge_usd <= fees_usd:
             self._log_skip(slug, "fees_above_edge",
+                           market_row=market_row,
+                           abs_edge=abs(edge),
+                           p_up=p_up,
+                           mid=mid,
+                           fill_price=fill,
+                           vol=vol,
+                           spot=spot,
                            gross_edge=f"{gross_edge_usd:.4f}",
                            fees=f"{fees_usd:.4f}")
             return
+
+        # Predicted EV: signed edge times notional. Realised EV (= pnl)
+        # is stamped at resolve time; the gap between this and pnl on
+        # resolved rows is the cleanest single number for "did the edge
+        # model translate into money."
+        size_float = float(size)
+        predicted_ev = Decimal(str(round(abs(edge) * size_float, 4)))
+
+        # Spot-trajectory snapshot from the in-memory tick buffer. Pure
+        # reads, no network. None when buffer doesn't span the lookback.
+        return_5m = return_15m = return_30m = None
+        realized_vol_5m = None
+        if hasattr(source, "recent_return"):
+            return_5m = source.recent_return(seconds_back=300)
+            return_15m = source.recent_return(seconds_back=900)
+            return_30m = source.recent_return(seconds_back=1800)
+        if hasattr(source, "realized_vol"):
+            realized_vol_5m = source.realized_vol(window_s=300)
+
+        # Concurrency flag: another trade on this asset within the last
+        # 60s suggests a clustered (correlated) decision. Calibration
+        # analysis can use this to weight independent samples differently.
+        concurrent_with_prior = False
+        if hasattr(self._repo, "count_recent_trades_for_asset"):
+            try:
+                concurrent_with_prior = self._repo.count_recent_trades_for_asset(
+                    asset_id, seconds=60,
+                ) > 0
+            except Exception:
+                logger.exception("count_recent_trades_for_asset failed for %s", asset_id)
 
         trade = QuantShortTrade(
             market_id=market_id,
@@ -296,6 +347,12 @@ class QuantDecider:
             spot_at_decision=spot,
             vol_at_decision=vol,
             edge_at_decision=edge,
+            predicted_ev=predicted_ev,
+            return_5m=return_5m,
+            return_15m=return_15m,
+            return_30m=return_30m,
+            realized_vol_5m=realized_vol_5m,
+            concurrent_with_prior=concurrent_with_prior,
         )
         self._repo.insert_trade(trade)
         self._opened_this_cycle += 1
@@ -383,15 +440,89 @@ class QuantDecider:
             notional = Decimal(contracts) * fill
         return notional.quantize(Decimal("0.01"))
 
-    @staticmethod
-    def _log_skip(slug: str, reason: str, **fields) -> None:
-        """Emit ``SKIP <slug> reason=<code> [k=v ...]`` for the operator.
+    # Diagnostic fields the rejections table promotes to first-class
+    # columns. Anything else passed to ``_log_skip(**fields)`` lands in
+    # the JSONB ``extra`` column instead.
+    _REJECTION_NUMERIC_FIELDS = {
+        "abs_edge", "p_up", "mid", "fill_price", "vol", "spot",
+    }
+
+    def _log_skip(
+        self,
+        slug: str,
+        reason: str,
+        *,
+        market_row: dict | None = None,
+        **fields,
+    ) -> None:
+        """Emit ``SKIP <slug> reason=<code>`` and persist a rejection row.
 
         Single line per skip so ``grep SKIP`` is the natural read pattern.
-        ``grep "reason=<code>"`` filters by gate.
+        ``grep "reason=<code>"`` filters by gate. The same data is also
+        written to ``quant_decider_rejections`` when the repo supports
+        it, so post-hoc analysis can look at the considered-but-skipped
+        pool the same way it looks at trades.
+
+        Args:
+            slug: Market slug for the log line.
+            reason: Reason code (the same string used in log output).
+            market_row: Market row dict; used to populate polymarket_id
+                and asset_id on the persisted rejection. Optional so
+                older fixtures keep working.
+            **fields: Diagnostic key/value pairs. Numeric ones with names
+                in :data:`_REJECTION_NUMERIC_FIELDS` are promoted to
+                dedicated columns; everything else is bundled into the
+                JSONB ``extra`` column.
         """
         if fields:
-            extra = " ".join(f"{k}={v}" for k, v in fields.items())
-            logger.info("SKIP %s reason=%s %s", slug, reason, extra)
+            extra_log = " ".join(f"{k}={v}" for k, v in fields.items())
+            logger.info("SKIP %s reason=%s %s", slug, reason, extra_log)
         else:
             logger.info("SKIP %s reason=%s", slug, reason)
+
+        if not hasattr(self._repo, "insert_rejection"):
+            return
+
+        promoted: dict[str, float | None] = {}
+        extra: dict[str, str] = {}
+        for key, value in fields.items():
+            if key in self._REJECTION_NUMERIC_FIELDS:
+                promoted[key] = self._coerce_numeric(value)
+            else:
+                extra[key] = str(value)
+
+        try:
+            self._repo.insert_rejection(
+                reason=reason,
+                slug=slug,
+                polymarket_id=(market_row or {}).get("polymarket_id"),
+                asset_id=(market_row or {}).get("asset_id"),
+                abs_edge=promoted.get("abs_edge"),
+                p_up=promoted.get("p_up"),
+                mid=promoted.get("mid"),
+                fill_price=promoted.get("fill_price"),
+                vol=promoted.get("vol"),
+                spot=promoted.get("spot"),
+                extra=extra or None,
+            )
+        except Exception:
+            # Persisting a rejection must never crash the decider; the
+            # log line above is the durable fallback.
+            logger.exception("failed to persist rejection for %s", slug)
+
+    @staticmethod
+    def _coerce_numeric(value) -> float | None:
+        """Best-effort numeric coercion for promoted rejection fields.
+
+        Some gates pass formatted strings ("+0.0123"); strip and parse.
+        Returns None when the value isn't interpretable as a float so
+        the rejection still inserts (the column accepts NULL).
+        """
+        if value is None:
+            return None
+        if isinstance(value, (int, float, Decimal)):
+            return float(value)
+        try:
+            return float(str(value).lstrip("+"))
+        except (TypeError, ValueError):
+            return None

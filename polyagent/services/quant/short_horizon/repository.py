@@ -27,13 +27,36 @@ UPSERT_MARKET = """
 INSERT_TRADE = """
     INSERT INTO quant_short_trades (
         market_id, side, fill_price_assumed, size,
-        estimator_p_up, spot_at_decision, vol_at_decision, edge_at_decision
+        estimator_p_up, spot_at_decision, vol_at_decision, edge_at_decision,
+        predicted_ev, return_5m, return_15m, return_30m,
+        realized_vol_5m, concurrent_with_prior
     ) VALUES (
         %(market_id)s, %(side)s, %(fill_price_assumed)s, %(size)s,
         %(estimator_p_up)s, %(spot_at_decision)s, %(vol_at_decision)s,
-        %(edge_at_decision)s
+        %(edge_at_decision)s,
+        %(predicted_ev)s, %(return_5m)s, %(return_15m)s, %(return_30m)s,
+        %(realized_vol_5m)s, %(concurrent_with_prior)s
     )
     RETURNING id
+"""
+
+INSERT_REJECTION = """
+    INSERT INTO quant_decider_rejections (
+        polymarket_id, slug, asset_id, reason,
+        abs_edge, p_up, mid, fill_price, vol, spot, extra
+    ) VALUES (
+        %(polymarket_id)s, %(slug)s, %(asset_id)s, %(reason)s,
+        %(abs_edge)s, %(p_up)s, %(mid)s, %(fill_price)s, %(vol)s, %(spot)s,
+        %(extra)s
+    )
+"""
+
+COUNT_RECENT_TRADES_FOR_ASSET = """
+    SELECT COUNT(*) AS n
+    FROM quant_short_trades t
+    JOIN quant_short_markets m ON m.id = t.market_id
+    WHERE m.asset_id = %(asset_id)s
+      AND t.decision_ts > NOW() - (%(seconds)s * INTERVAL '1 second')
 """
 
 SELECT_UNRESOLVED_PAST_END = """
@@ -71,9 +94,17 @@ SELECT_TRADES_FOR_MARKET = """
 """
 
 UPDATE_TRADE_PNL = """
-    UPDATE quant_short_trades
-    SET pnl = %(pnl)s, resolved_at = NOW()
-    WHERE id = %(id)s
+    UPDATE quant_short_trades t
+    SET pnl = %(pnl)s,
+        resolved_at = NOW(),
+        resolution_lag_s = GREATEST(
+            0,
+            EXTRACT(
+                EPOCH FROM (NOW() - m.window_end_ts)
+            )::INTEGER
+        )
+    FROM quant_short_markets m
+    WHERE t.id = %(id)s AND m.id = t.market_id
 """
 
 COUNT_OPEN_TRADES_FOR_ASSET = """
@@ -145,8 +176,66 @@ class QuantShortRepository:
                 "spot_at_decision": trade.spot_at_decision,
                 "vol_at_decision": trade.vol_at_decision,
                 "edge_at_decision": trade.edge_at_decision,
+                "predicted_ev": trade.predicted_ev,
+                "return_5m": trade.return_5m,
+                "return_15m": trade.return_15m,
+                "return_30m": trade.return_30m,
+                "realized_vol_5m": trade.realized_vol_5m,
+                "concurrent_with_prior": trade.concurrent_with_prior,
             })
             return cur.fetchone()["id"]
+
+    def insert_rejection(
+        self,
+        *,
+        reason: str,
+        polymarket_id: str | None = None,
+        slug: str | None = None,
+        asset_id: str | None = None,
+        abs_edge: float | None = None,
+        p_up: float | None = None,
+        mid: float | None = None,
+        fill_price: Decimal | None = None,
+        vol: float | None = None,
+        spot: Decimal | None = None,
+        extra: dict | None = None,
+    ) -> None:
+        """Persist a single decider-rejection event for post-hoc analysis.
+
+        Used to make the ``Markets Rejected`` counter inspectable: each
+        skip path in the decider calls this with the gate's reason code
+        and whichever diagnostic fields it had at the time. ``extra``
+        carries any gate-specific key/value pairs that don't fit the
+        common columns (limits, headroom, asset-spec values, etc.).
+        """
+        from json import dumps
+        with self._db.cursor() as cur:
+            cur.execute(INSERT_REJECTION, {
+                "polymarket_id": polymarket_id,
+                "slug": slug,
+                "asset_id": asset_id,
+                "reason": reason,
+                "abs_edge": abs_edge,
+                "p_up": p_up,
+                "mid": mid,
+                "fill_price": fill_price,
+                "vol": vol,
+                "spot": spot,
+                "extra": dumps(extra) if extra else None,
+            })
+
+    def count_recent_trades_for_asset(self, asset_id: str, seconds: int = 60) -> int:
+        """Return the number of trades on this asset within the last ``seconds``.
+
+        Used by the decider to flag ``concurrent_with_prior`` so calibration
+        analysis can separate independent samples from clustered ones.
+        """
+        with self._db.cursor() as cur:
+            cur.execute(COUNT_RECENT_TRADES_FOR_ASSET, {
+                "asset_id": asset_id, "seconds": int(seconds),
+            })
+            row = cur.fetchone()
+        return int(row["n"]) if row else 0
 
     def get_active_markets(self, now: datetime) -> list[dict]:
         """Return all open markets whose resolution window has not yet closed."""

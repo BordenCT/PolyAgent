@@ -122,6 +122,45 @@ class CoinbaseSpotSource:
         per_s_variance = variance * len(log_returns) / span_s
         return math.sqrt(per_s_variance * _SECONDS_PER_YEAR)
 
+    def recent_return(
+        self,
+        seconds_back: int,
+        _now: float | None = None,
+    ) -> float | None:
+        """Return simple log-style return between current and ~``seconds_back`` ago.
+
+        Computed entirely from the in-memory rolling buffer; never makes
+        a network call. Used by the decider to capture spot-trajectory
+        regime alongside each trade without slowing the hot path.
+
+        ``_now`` is exposed for tests so the buffer can be inspected at a
+        deterministic clock; production code passes None and the latest
+        buffered timestamp is used as the anchor (the same convention
+        :meth:`realized_vol` uses, so mocked-tick test code keeps working).
+
+        Returns None when the buffer has no current sample, or when no
+        sample exists at or before ``now - seconds_back`` to anchor to.
+        """
+        if not self._buf:
+            return None
+        anchor_ts = _now if _now is not None else self._buf[-1][0]
+        target_ts = anchor_ts - seconds_back
+        # Pick the sample whose timestamp is closest to target_ts but not
+        # newer than it (we want a price from at-or-before the lookback,
+        # not a future sample interpolated backwards).
+        candidate: tuple[float, Decimal] | None = None
+        for t, p in self._buf:
+            if t > target_ts:
+                break
+            candidate = (t, p)
+        if candidate is None:
+            return None
+        latest_price = float(self._buf[-1][1])
+        prior_price = float(candidate[1])
+        if prior_price <= 0 or latest_price <= 0:
+            return None
+        return latest_price / prior_price - 1.0
+
     def price_at(self, ts: datetime) -> Decimal | None:
         """Return the historical close nearest to ``ts`` (SettlementSource).
 

@@ -385,5 +385,15 @@ class QuantShortTrade:
     vol_at_decision: float
     edge_at_decision: float
     pnl: Decimal | None = None
+    # Analytics columns (migration 009). Captured at insert time so
+    # post-hoc analysis can run as a single query without joining a
+    # tick archive. All optional; the legacy decider path that doesn't
+    # populate them stays compatible.
+    predicted_ev: Decimal | None = None
+    return_5m: float | None = None
+    return_15m: float | None = None
+    return_30m: float | None = None
+    realized_vol_5m: float | None = None
+    concurrent_with_prior: bool = False
 
 

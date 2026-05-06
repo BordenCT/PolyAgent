@@ -24,7 +24,8 @@ STATS_QUERY_TOTAL = """
         COALESCE(AVG(vol_at_decision), 0)   AS avg_vol,
         COALESCE(SUM(size), 0)              AS total_staked,
         COALESCE(AVG(size), 0)              AS avg_size,
-        COALESCE(AVG(size / NULLIF(fill_price_assumed, 0)), 0) AS avg_contracts
+        COALESCE(AVG(size / NULLIF(fill_price_assumed, 0)), 0) AS avg_contracts,
+        AVG(brier)                          AS avg_brier
     FROM quant_short_v
     WHERE pnl IS NOT NULL
       AND (%(asset)s::text IS NULL OR asset_id = %(asset)s)
@@ -40,7 +41,8 @@ STATS_QUERY_BY_DURATION = """
         COALESCE(SUM(pnl), 0)               AS total_pnl,
         COALESCE(AVG(pnl), 0)               AS avg_pnl,
         COALESCE(SUM(size), 0)              AS total_staked,
-        COALESCE(AVG(size / NULLIF(fill_price_assumed, 0)), 0) AS avg_contracts
+        COALESCE(AVG(size / NULLIF(fill_price_assumed, 0)), 0) AS avg_contracts,
+        AVG(brier)                          AS avg_brier
     FROM quant_short_v
     WHERE pnl IS NOT NULL
       AND (%(asset)s::text IS NULL OR asset_id = %(asset)s)
@@ -58,7 +60,8 @@ STATS_QUERY_BY_ASSET = """
         COALESCE(SUM(pnl), 0)               AS total_pnl,
         COALESCE(AVG(pnl), 0)               AS avg_pnl,
         COALESCE(SUM(size), 0)              AS total_staked,
-        COALESCE(AVG(size / NULLIF(fill_price_assumed, 0)), 0) AS avg_contracts
+        COALESCE(AVG(size / NULLIF(fill_price_assumed, 0)), 0) AS avg_contracts,
+        AVG(brier)                          AS avg_brier
     FROM quant_short_v
     WHERE pnl IS NOT NULL
     GROUP BY asset_id
@@ -90,7 +93,8 @@ STATS_QUERY_BY_EDGE = """
         COALESCE(SUM(pnl), 0)               AS total_pnl,
         COALESCE(AVG(pnl), 0)               AS avg_pnl,
         COALESCE(SUM(size), 0)              AS total_staked,
-        COALESCE(AVG(size / NULLIF(fill_price_assumed, 0)), 0) AS avg_contracts
+        COALESCE(AVG(size / NULLIF(fill_price_assumed, 0)), 0) AS avg_contracts,
+        AVG(brier)                          AS avg_brier
     FROM quant_short_v
     WHERE pnl IS NOT NULL
       AND (%(asset)s::text IS NULL OR asset_id = %(asset)s)
@@ -111,7 +115,8 @@ STATS_QUERY_BY_SIDE = """
         COALESCE(SUM(pnl), 0)               AS total_pnl,
         COALESCE(AVG(pnl), 0)               AS avg_pnl,
         COALESCE(SUM(size), 0)              AS total_staked,
-        COALESCE(AVG(size / NULLIF(fill_price_assumed, 0)), 0) AS avg_contracts
+        COALESCE(AVG(size / NULLIF(fill_price_assumed, 0)), 0) AS avg_contracts,
+        AVG(brier)                          AS avg_brier
     FROM quant_short_v
     WHERE pnl IS NOT NULL
       AND (%(asset)s::text IS NULL OR asset_id = %(asset)s)
@@ -144,7 +149,8 @@ STATS_QUERY_BY_VOL = """
         COALESCE(SUM(pnl), 0)               AS total_pnl,
         COALESCE(AVG(pnl), 0)               AS avg_pnl,
         COALESCE(SUM(size), 0)              AS total_staked,
-        COALESCE(AVG(size / NULLIF(fill_price_assumed, 0)), 0) AS avg_contracts
+        COALESCE(AVG(size / NULLIF(fill_price_assumed, 0)), 0) AS avg_contracts,
+        AVG(brier)                          AS avg_brier
     FROM quant_short_v
     WHERE pnl IS NOT NULL
       AND (%(asset)s::text IS NULL OR asset_id = %(asset)s)
@@ -173,11 +179,12 @@ def _render_breakdown(console: Console, rows, title: str, key_col: str, key_fmt)
     table.add_column("Avg |Edge|", justify="right")
     table.add_column("Staked", justify="right")
     table.add_column("Avg Ctrs", justify="right", style="dim")
+    table.add_column("Brier", justify="right", style="dim")
     table.add_column("Avg P&L", justify="right")
     table.add_column("Total P&L", justify="right")
     table.add_column("ROI", justify="right")
     if not rows:
-        table.add_row("(none)", "0", "-", "-", "-", "-", "-", "-", "$0.00", "-")
+        table.add_row("(none)", "0", "-", "-", "-", "-", "-", "-", "-", "$0.00", "-")
     else:
         for r in rows:
             trades = int(r["trades"])
@@ -189,10 +196,17 @@ def _render_breakdown(console: Console, rows, title: str, key_col: str, key_fmt)
             avg_edge = float(r["avg_edge"])
             total_staked = float(r["total_staked"])
             avg_contracts = float(r["avg_contracts"])
+            avg_brier_raw = r.get("avg_brier") if hasattr(r, "get") else r["avg_brier"]
+            avg_brier = float(avg_brier_raw) if avg_brier_raw is not None else None
             roi = (total_pnl / total_staked * 100) if total_staked > 0 else 0.0
             pnl_style = "green" if total_pnl >= 0 else "red"
             roi_style = "green" if roi >= 0 else "red"
             avg_pnl_style = "green" if avg_pnl >= 0 else "red"
+            # Lower Brier is better. 0.25 = random, 0.0 = perfect.
+            # Highlight when calibration is worse than coin-flip so it
+            # doesn't blend into the dim column treatment.
+            brier_str = "-" if avg_brier is None else f"{avg_brier:.3f}"
+            brier_style = "red" if avg_brier is not None and avg_brier > 0.25 else "dim"
             table.add_row(
                 key_fmt(r),
                 str(trades),
@@ -201,10 +215,61 @@ def _render_breakdown(console: Console, rows, title: str, key_col: str, key_fmt)
                 f"{avg_edge:.4f}",
                 f"${total_staked:,.2f}",
                 f"{avg_contracts:.2f}",
+                f"[{brier_style}]{brier_str}[/{brier_style}]",
                 f"[{avg_pnl_style}]${avg_pnl:+,.2f}[/{avg_pnl_style}]",
                 f"[{pnl_style}]${total_pnl:+,.2f}[/{pnl_style}]",
                 f"[{roi_style}]{roi:+.1f}%[/{roi_style}]",
             )
+    console.print(table)
+
+
+# Rejection breakdown: which gates are filtering markets out, and how
+# often. Pairs naturally with the trade-level views above; together they
+# give the full picture of what the decider considered, accepted, and
+# refused. Defaults to the last 24 hours so the result tracks "current
+# behaviour" rather than ancient cycles.
+STATS_QUERY_REJECTIONS = """
+    SELECT reason,
+           COUNT(*)                 AS n,
+           AVG(abs_edge)            AS avg_abs_edge,
+           AVG(p_up)                AS avg_p_up,
+           AVG(mid)                 AS avg_mid,
+           AVG(vol)                 AS avg_vol
+    FROM quant_decider_rejections
+    WHERE decision_ts > NOW() - (%(hours)s * INTERVAL '1 hour')
+    GROUP BY reason
+    ORDER BY n DESC
+"""
+
+
+def _render_rejections(console: Console, rows, hours: float) -> None:
+    table = Table(title=f"Decider Rejections (last {hours:g}h)")
+    table.add_column("Reason", style="cyan")
+    table.add_column("Count", justify="right")
+    table.add_column("Avg |Edge|", justify="right", style="dim")
+    table.add_column("Avg p_up", justify="right", style="dim")
+    table.add_column("Avg Mid", justify="right", style="dim")
+    table.add_column("Avg Vol", justify="right", style="dim")
+    if not rows:
+        table.add_row("(none)", "0", "-", "-", "-", "-")
+        console.print(table)
+        return
+    total = sum(int(r["n"]) for r in rows)
+    for r in rows:
+        n = int(r["n"])
+        share = (n / total * 100) if total else 0.0
+        edge = r["avg_abs_edge"]
+        p_up = r["avg_p_up"]
+        mid = r["avg_mid"]
+        vol = r["avg_vol"]
+        table.add_row(
+            r["reason"],
+            f"{n} ({share:.0f}%)",
+            f"{float(edge):.4f}" if edge is not None else "-",
+            f"{float(p_up):.3f}" if p_up is not None else "-",
+            f"{float(mid):.3f}" if mid is not None else "-",
+            f"{float(vol):.3f}" if vol is not None else "-",
+        )
     console.print(table)
 
 
@@ -224,6 +289,11 @@ def _render_breakdown(console: Console, rows, title: str, key_col: str, key_fmt)
 @click.option("--by-vol", is_flag=True,
               help="Bucket by realized vol at decision. Helps spot regimes "
                    "where the lognormal estimator is over- or under-confident.")
+@click.option("--rejections", is_flag=True,
+              help="Show why the decider has been filtering markets out: "
+                   "gate-by-gate breakdown of recent rejections.")
+@click.option("--hours", type=float, default=24.0,
+              help="Lookback window for --rejections (default 24h).")
 def quant_stats(
     asset: str | None,
     by_duration: bool,
@@ -231,6 +301,8 @@ def quant_stats(
     by_edge: bool,
     by_side: bool,
     by_vol: bool,
+    rejections: bool,
+    hours: float,
 ) -> None:
     """Paper-trading performance of the quant short-horizon subsystem."""
     console = Console()
@@ -238,6 +310,13 @@ def quant_stats(
     db = Database(settings)
 
     try:
+        if rejections:
+            with db.cursor() as cur:
+                cur.execute(STATS_QUERY_REJECTIONS, {"hours": float(hours)})
+                rows = cur.fetchall()
+            _render_rejections(console, rows, hours)
+            return
+
         if by_asset:
             with db.cursor() as cur:
                 cur.execute(STATS_QUERY_BY_ASSET)
@@ -328,6 +407,8 @@ def quant_stats(
         total_staked = float(row["total_staked"] or 0)
         avg_size = float(row["avg_size"] or 0)
         avg_contracts = float(row["avg_contracts"] or 0)
+        avg_brier_raw = row["avg_brier"]
+        avg_brier = float(avg_brier_raw) if avg_brier_raw is not None else None
         roi = (total_pnl / total_staked * 100) if total_staked > 0 else 0
 
         title = (
@@ -356,6 +437,13 @@ def quant_stats(
         table.add_row("Total P&L", f"[{pnl_style}]${total_pnl:+,.2f}[/{pnl_style}]")
         table.add_row("ROI", f"{roi:+.2f}%")
         table.add_row("Avg Realized Vol", f"{avg_vol:.3f}")
+        if avg_brier is not None:
+            brier_style = "red" if avg_brier > 0.25 else "green"
+            table.add_row(
+                "Avg Brier",
+                f"[{brier_style}]{avg_brier:.3f}[/{brier_style}]"
+                " (lower=better, 0.25=random)",
+            )
 
         console.print(table)
     finally:
