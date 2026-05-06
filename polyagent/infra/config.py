@@ -62,6 +62,7 @@ class Settings:
     min_contracts: int
     bankroll: float
     min_free_bankroll: float
+    max_cluster_exposure_fraction: float
     market_cooldown_hours: float
     exit_target_pct: float
     exit_volume_multiplier: float
@@ -129,6 +130,9 @@ class Settings:
             min_contracts=_env_int("MIN_CONTRACTS", 1),
             bankroll=_env_float("BANKROLL", 800.0),
             min_free_bankroll=_env_float("MIN_FREE_BANKROLL", 1.0),
+            max_cluster_exposure_fraction=_env_float(
+                "MAX_CLUSTER_EXPOSURE_FRACTION", 0.10,
+            ),
             market_cooldown_hours=_env_float("MARKET_COOLDOWN_HOURS", 24.0),
             exit_target_pct=_env_float("EXIT_TARGET_PCT", 0.85),
             exit_volume_multiplier=_env_float("EXIT_VOLUME_MULTIPLIER", 3.0),

@@ -8,6 +8,7 @@ from uuid import UUID
 
 from polyagent.infra.database import Database
 from polyagent.models import ExitReason, PositionStatus
+from polyagent.services.cluster_exposure import sum_positions_in_cluster
 
 logger = logging.getLogger("polyagent.repositories.positions")
 
@@ -164,6 +165,18 @@ class PositionRepository:
         with self._db.cursor() as cur:
             cur.execute(SELECT_RECENTLY_CLOSED_MARKET_IDS, {"hours": float(hours)})
             return {row["market_id"] for row in cur.fetchall()}
+
+    def sum_open_size_by_cluster(self, cluster_key: tuple[str, str]) -> Decimal:
+        """Return the total ``position_size`` of open positions in a cluster.
+
+        Used by the executor's correlation cap to bound aggregate exposure
+        on positions that resolve at the same settlement event. The
+        cluster grouping is computed in Python (via the strike parser)
+        against the same ``get_open()`` rows the rest of the bot uses,
+        so any open position that joins to a parseable strike question
+        contributes to its cluster sum.
+        """
+        return sum_positions_in_cluster(self.get_open(), cluster_key)
 
     def get_capital_state(self) -> tuple[Decimal, Decimal]:
         """Return (open_capital, realized_pnl) summed over the positions table.

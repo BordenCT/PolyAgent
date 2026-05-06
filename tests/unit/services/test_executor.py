@@ -297,3 +297,118 @@ class TestExecutorHotReload:
         assert ex._bankroll == 800.0
         assert ex._min_free_bankroll == 1.0
         assert ex._min_contracts == 3
+
+
+class TestClusterHeadroom:
+    """cluster_headroom kwarg: scale a Kelly bet down so aggregate exposure
+    inside a correlation cluster never exceeds the cap. Smaller of
+    (bankroll headroom, cluster headroom) wins."""
+
+    def _thesis(self, estimate: float = 0.82):
+        return Thesis.create(
+            market_id=uuid4(),
+            claude_estimate=estimate,
+            confidence=0.85,
+            checks=ThesisChecks(base_rate=True, news=True, whale=False, disposition=True),
+            thesis_text="t",
+        )
+
+    def _buy_votes(self) -> list[Vote]:
+        return [
+            Vote(action=VoteAction.BUY, confidence=0.8, reason="a"),
+            Vote(action=VoteAction.BUY, confidence=0.7, reason="b"),
+            Vote(action=VoteAction.HOLD, confidence=0.3, reason="c"),
+        ]
+
+    def test_cluster_headroom_scales_down_kelly(self):
+        """Kelly would size $200 but cluster has only $5 headroom left;
+        the executed position must fit inside the cluster cap."""
+        ex = ExecutorService(
+            kelly_max_fraction=0.25, bankroll=800.0, paper_trade=True,
+        )
+        position = ex.execute(
+            thesis=self._thesis(estimate=0.82),
+            votes=self._buy_votes(),
+            market_price=Decimal("0.65"),
+            current_bankroll=800.0,
+            cluster_headroom=5.0,
+        )
+        assert position is not None
+        assert float(position.position_size) <= 5.0
+
+    def test_cluster_headroom_none_means_no_cap(self):
+        """A None cluster_headroom must behave identically to before this
+        feature existed: bankroll headroom alone gates sizing."""
+        ex = ExecutorService(
+            kelly_max_fraction=0.25, bankroll=800.0, paper_trade=True,
+        )
+        capped = ex.execute(
+            thesis=self._thesis(estimate=0.82),
+            votes=self._buy_votes(),
+            market_price=Decimal("0.65"),
+            cluster_headroom=None,
+        )
+        baseline = ex.execute(
+            thesis=self._thesis(estimate=0.82),
+            votes=self._buy_votes(),
+            market_price=Decimal("0.65"),
+        )
+        assert capped is not None
+        assert baseline is not None
+        assert float(capped.position_size) == float(baseline.position_size)
+
+    def test_cluster_headroom_zero_skips_trade(self):
+        """A fully-saturated cluster (zero headroom remaining) refuses
+        any further trade in that cluster regardless of Kelly's view."""
+        ex = ExecutorService(
+            kelly_max_fraction=0.25, bankroll=800.0, paper_trade=True,
+        )
+        position = ex.execute(
+            thesis=self._thesis(estimate=0.82),
+            votes=self._buy_votes(),
+            market_price=Decimal("0.65"),
+            cluster_headroom=0.0,
+        )
+        assert position is None
+
+    def test_cluster_headroom_below_min_contract_skips(self):
+        """Headroom too small to fit a single integer contract must skip,
+        not place a sub-contract bet."""
+        ex = ExecutorService(
+            kelly_max_fraction=0.25, bankroll=800.0, paper_trade=True,
+            min_contracts=1,
+        )
+        position = ex.execute(
+            thesis=self._thesis(estimate=0.82),
+            votes=self._buy_votes(),
+            market_price=Decimal("0.65"),
+            cluster_headroom=0.10,  # < 1 contract × $0.65
+        )
+        assert position is None
+
+    def test_cluster_headroom_does_not_relax_bankroll_floor(self):
+        """When bankroll headroom is tighter than cluster headroom, the
+        bankroll floor still wins. cluster_headroom is an upper bound,
+        never a relaxation."""
+        ex = ExecutorService(
+            kelly_max_fraction=0.25, bankroll=10.0, paper_trade=True,
+            min_free_bankroll=8.0,  # bankroll headroom = $2
+        )
+        position = ex.execute(
+            thesis=self._thesis(estimate=0.82),
+            votes=self._buy_votes(),
+            market_price=Decimal("0.65"),
+            current_bankroll=10.0,
+            cluster_headroom=100.0,  # huge cluster headroom
+        )
+        assert position is not None
+        assert float(position.position_size) <= 2.0
+
+    def test_max_cluster_exposure_fraction_hot_reload(self):
+        """update_thresholds accepts max_cluster_exposure_fraction so the
+        cap can tune without restart. The stored value is what the caller
+        will use to compute cluster_headroom each cycle."""
+        ex = ExecutorService(max_cluster_exposure_fraction=0.10)
+        assert ex._max_cluster_exposure_fraction == 0.10
+        ex.update_thresholds(max_cluster_exposure_fraction=0.20)
+        assert ex._max_cluster_exposure_fraction == 0.20

@@ -39,6 +39,7 @@ from polyagent.services.quant.short_horizon.repository import QuantShortReposito
 from polyagent.services.quant.short_horizon.resolver import QuantResolver
 from polyagent.services.quant.short_horizon.scanner import QuantShortScanner
 from polyagent.services.quant.strike import QuantStrikeService
+from polyagent.services.quant.strike.parser import cluster_key as strike_cluster_key
 from polyagent.services.scanner import ScannerService
 from polyagent.strategies.arbitrage import ArbitrageStrategy
 from polyagent.strategies.convergence import ConvergenceStrategy
@@ -157,6 +158,7 @@ def run() -> None:
         paper_trade=settings.paper_trade,
         min_free_bankroll=settings.min_free_bankroll,
         min_contracts=settings.min_contracts,
+        max_cluster_exposure_fraction=settings.max_cluster_exposure_fraction,
     )
     exit_monitor = ExitMonitorService(
         target_pct=settings.exit_target_pct,
@@ -295,6 +297,21 @@ def run() -> None:
                     queues.thesis_queue.task_done()
                     continue
 
+                # Correlation cap. For markets that resolve at the same
+                # settlement event (today, crypto strike ladders), independent
+                # Kelly sizing across each strike produces aggregate exposure
+                # that can exceed sane risk bounds. Compute remaining cluster
+                # headroom and pass it to the executor; non-strike markets
+                # parse as None and behave as before.
+                cluster_headroom: float | None = None
+                ck = strike_cluster_key(market.question or "")
+                if ck is not None:
+                    cap = float(free_bankroll) * float(
+                        settings.max_cluster_exposure_fraction
+                    )
+                    existing = float(position_repo.sum_open_size_by_cluster(ck))
+                    cluster_headroom = max(cap - existing, 0.0)
+
                 if live_enabled:
                     position = executor.execute_live(
                         thesis=thesis,
@@ -303,6 +320,7 @@ def run() -> None:
                         polymarket_client=polymarket,
                         trade_log=trade_log_repo,
                         current_bankroll=free_bankroll,
+                        cluster_headroom=cluster_headroom,
                     )
                 else:
                     position = executor.execute(
@@ -311,6 +329,7 @@ def run() -> None:
                         market_price=market.midpoint_price,
                         volume_at_entry=market.volume_24h,
                         current_bankroll=free_bankroll,
+                        cluster_headroom=cluster_headroom,
                     )
 
                 if position:
@@ -518,7 +537,7 @@ def run() -> None:
         "max_price", "scanner_question_blocklist",
         "brain_confidence_threshold", "brain_min_checks", "brain_min_edge",
         "kelly_max_fraction", "bankroll", "min_free_bankroll",
-        "min_contracts",
+        "min_contracts", "max_cluster_exposure_fraction",
         "exit_target_pct", "exit_volume_multiplier", "exit_stale_hours",
         "exit_stale_threshold", "exit_poll_delay",
         "quant_position_size_usd", "quant_max_trades_per_cycle",
@@ -581,6 +600,7 @@ def run() -> None:
             bankroll=new_settings.bankroll,
             min_free_bankroll=new_settings.min_free_bankroll,
             min_contracts=new_settings.min_contracts,
+            max_cluster_exposure_fraction=new_settings.max_cluster_exposure_fraction,
         )
         exit_monitor.update_thresholds(
             target_pct=new_settings.exit_target_pct,

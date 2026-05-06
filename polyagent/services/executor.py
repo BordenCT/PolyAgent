@@ -45,12 +45,14 @@ class ExecutorService:
         paper_trade: bool = True,
         min_free_bankroll: float = 0.0,
         min_contracts: int = 1,
+        max_cluster_exposure_fraction: float = 0.10,
     ) -> None:
         self._kelly_max_fraction = kelly_max_fraction
         self._bankroll = bankroll
         self._paper_trade = paper_trade
         self._min_free_bankroll = min_free_bankroll
         self._min_contracts = max(1, int(min_contracts))
+        self._max_cluster_exposure_fraction = max_cluster_exposure_fraction
 
     def update_thresholds(
         self,
@@ -58,6 +60,7 @@ class ExecutorService:
         bankroll: float | None = None,
         min_free_bankroll: float | None = None,
         min_contracts: int | None = None,
+        max_cluster_exposure_fraction: float | None = None,
     ) -> None:
         """Hot-reload sizing knobs from a fresh .env without restart.
 
@@ -75,6 +78,8 @@ class ExecutorService:
             self._min_free_bankroll = min_free_bankroll
         if min_contracts is not None:
             self._min_contracts = max(1, int(min_contracts))
+        if max_cluster_exposure_fraction is not None:
+            self._max_cluster_exposure_fraction = max_cluster_exposure_fraction
 
     def kelly_size(
         self,
@@ -136,12 +141,20 @@ class ExecutorService:
         votes: list[Vote],
         market_price: Decimal,
         current_bankroll: float | None = None,
+        cluster_headroom: float | None = None,
     ) -> TradePlan | None:
         """Run consensus + Kelly sizing. Returns an intent to open, or None.
 
         Args:
             current_bankroll: Running equity for dynamic Kelly sizing. Falls back
                               to the configured bankroll if None.
+            cluster_headroom: Remaining dollar exposure available in this
+                              market's correlation cluster (e.g., crypto
+                              strikes resolving on the same date). When
+                              provided, the position is sized to the
+                              tighter of bankroll headroom and cluster
+                              headroom. ``None`` disables the cap and
+                              preserves pre-feature behaviour.
         """
         consensus, fraction, side = self.compute_consensus(votes)
 
@@ -169,7 +182,20 @@ class ExecutorService:
         )
         raw_size = kelly_amount * fraction
         effective_bankroll = current_bankroll if current_bankroll is not None else self._bankroll
-        headroom = effective_bankroll - self._min_free_bankroll
+        bankroll_headroom = effective_bankroll - self._min_free_bankroll
+        # Cluster cap: an upper bound only. Never relaxes bankroll headroom.
+        # None means "no cluster context known"; treat as unbounded.
+        if cluster_headroom is None:
+            headroom = bankroll_headroom
+        else:
+            headroom = min(bankroll_headroom, cluster_headroom)
+        if headroom <= 0:
+            logger.info(
+                "SKIP %s — no headroom (bankroll=%.2f, cluster=%s)",
+                thesis.market_id, bankroll_headroom,
+                "n/a" if cluster_headroom is None else f"{cluster_headroom:.2f}",
+            )
+            return None
         position_size = round(min(raw_size, headroom), 2)
 
         if position_size <= 0:
@@ -226,9 +252,14 @@ class ExecutorService:
         market_price: Decimal,
         volume_at_entry: Decimal = Decimal("0"),
         current_bankroll: float | None = None,
+        cluster_headroom: float | None = None,
     ) -> Position | None:
         """Plan and open a paper position. Returns None if no trade is taken."""
-        plan = self.plan(thesis, votes, market_price, current_bankroll=current_bankroll)
+        plan = self.plan(
+            thesis, votes, market_price,
+            current_bankroll=current_bankroll,
+            cluster_headroom=cluster_headroom,
+        )
         if plan is None:
             return None
 
@@ -259,6 +290,7 @@ class ExecutorService:
         polymarket_client: "PolymarketClient",
         trade_log: "TradeLogRepository | None" = None,
         current_bankroll: float | None = None,
+        cluster_headroom: float | None = None,
     ) -> Position | None:
         """Plan, place a real order via the CLOB, and return the opened position.
 
@@ -266,7 +298,11 @@ class ExecutorService:
         On placement failure, the attempt is recorded to trade_log (if provided)
         against a synthesized position ID so the error is auditable.
         """
-        plan = self.plan(thesis, votes, market.midpoint_price, current_bankroll=current_bankroll)
+        plan = self.plan(
+            thesis, votes, market.midpoint_price,
+            current_bankroll=current_bankroll,
+            cluster_headroom=cluster_headroom,
+        )
         if plan is None:
             return None
 
