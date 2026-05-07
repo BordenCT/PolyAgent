@@ -102,7 +102,6 @@ class QuantDecider:
         kelly_max_fraction: float = 0.25,
         min_free_bankroll: Decimal = Decimal("1.0"),
         min_contracts: int = 1,
-        use_constant_predictor: bool = False,
     ) -> None:
         self._sources = sources
         self._book = book
@@ -116,7 +115,6 @@ class QuantDecider:
         self._kelly_max_fraction = float(kelly_max_fraction)
         self._min_free_bankroll = Decimal(str(min_free_bankroll))
         self._min_contracts = max(1, int(min_contracts))
-        self._use_constant_predictor = bool(use_constant_predictor)
 
     def update_thresholds(
         self,
@@ -126,7 +124,6 @@ class QuantDecider:
         kelly_max_fraction: float | None = None,
         min_free_bankroll: Decimal | None = None,
         min_contracts: int | None = None,
-        use_constant_predictor: bool | None = None,
     ) -> None:
         """Hot-reload sizing/cap knobs from a fresh .env without restart.
 
@@ -145,8 +142,6 @@ class QuantDecider:
             self._min_free_bankroll = Decimal(str(min_free_bankroll))
         if min_contracts is not None:
             self._min_contracts = max(1, int(min_contracts))
-        if use_constant_predictor is not None:
-            self._use_constant_predictor = bool(use_constant_predictor)
 
     def reset_cycle(self) -> None:
         """Reset the per-cycle trade counter. Call at the start of each scan."""
@@ -289,23 +284,14 @@ class QuantDecider:
                            threshold=f"{spec.edge_threshold:.4f}")
             return
 
-        # Side determination. The default policy uses the lognormal
-        # estimator's directional view (sign of `edge = p_up - mid`).
-        #
-        # When ``use_constant_predictor`` is set, the side is chosen by
-        # fading the market mid instead: bet YES if mid<0.5, NO otherwise,
-        # and recompute the sizing edge against 0.5. Selection (the
-        # |edge|>threshold gate above) still uses the original Phi(d2)
-        # p_up, so the trade universe is unchanged from the standard
-        # policy. This isolates the predictor's *direction* call as the
-        # single variable being changed, mirroring the disagreement-only
-        # counterfactual that motivated the flag.
-        if self._use_constant_predictor:
-            sizing_edge = 0.5 - mid
-        else:
-            sizing_edge = edge
-
-        if sizing_edge > 0:
+        # Determine side and per-contract fill price. For YES we buy the
+        # YES token at its ask; for NO we buy the NO token at the NO ask
+        # (= 1 - YES_bid by no-arbitrage). Storing the actual price paid
+        # in the side's own coordinate system is what compute_pnl assumes,
+        # and what the brain executor already does (see services/executor.
+        # py:288). Previously this stored fill = YES_bid for NO trades,
+        # which silently understated NO stake AND broke the P&L formula.
+        if edge > 0:
             side, fill = "YES", ask
         else:
             side, fill = "NO", (Decimal("1") - bid)
@@ -315,22 +301,17 @@ class QuantDecider:
         # we can't afford anything anyway. Decoupled from the cap check
         # because a tight bankroll is a stricter constraint than the
         # simultaneous-trades cap.
-        # Sizing, fees, and stored edge_at_decision all use the *decision*
-        # edge — i.e., ``sizing_edge`` — so that the data row faithfully
-        # records the predictor that drove the trade, not the legacy
-        # Phi(d2) view. ``estimator_p_up`` still records the legacy view
-        # for post-hoc comparison.
-        size = self._compute_size(sizing_edge, slug, fill)
+        size = self._compute_size(edge, slug, fill)
         if size is None:
             return  # already logged
 
         size_fraction = float(size)
-        gross_edge_usd = abs(sizing_edge) * size_fraction
+        gross_edge_usd = abs(edge) * size_fraction
         fees_usd = size_fraction * spec.fee_bps / 10_000.0
         if gross_edge_usd <= fees_usd:
             self._log_skip(slug, "fees_above_edge",
                            market_row=market_row,
-                           abs_edge=abs(sizing_edge),
+                           abs_edge=abs(edge),
                            p_up=p_up,
                            mid=mid,
                            fill_price=fill,
@@ -345,7 +326,7 @@ class QuantDecider:
         # resolved rows is the cleanest single number for "did the edge
         # model translate into money."
         size_float = float(size)
-        predicted_ev = Decimal(str(round(abs(sizing_edge) * size_float, 4)))
+        predicted_ev = Decimal(str(round(abs(edge) * size_float, 4)))
 
         # Spot-trajectory snapshot from the in-memory tick buffer. Pure
         # reads, no network. None when buffer doesn't span the lookback.
@@ -378,7 +359,7 @@ class QuantDecider:
             estimator_p_up=p_up,
             spot_at_decision=spot,
             vol_at_decision=vol,
-            edge_at_decision=sizing_edge,
+            edge_at_decision=edge,
             predicted_ev=predicted_ev,
             return_5m=return_5m,
             return_15m=return_15m,
@@ -391,7 +372,7 @@ class QuantDecider:
         contracts = float(size) / float(fill) if float(fill) > 0 else 0.0
         logger.info(
             "PAPER %s side=%s edge=%+.4f p_up=%.4f mid=%.4f size=$%.2f contracts=%.2f asset=%s",
-            slug, side, sizing_edge, p_up, mid, float(size), contracts, asset_id,
+            slug, side, edge, p_up, mid, float(size), contracts, asset_id,
         )
 
     def _compute_size(self, edge: float, slug: str, fill: Decimal) -> Decimal | None:
