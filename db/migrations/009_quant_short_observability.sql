@@ -67,66 +67,10 @@ ALTER TABLE quant_short_trades
     ADD COLUMN IF NOT EXISTS concurrent_with_prior BOOLEAN NOT NULL DEFAULT FALSE;
 
 
--- Rebuild the read view to expose the new columns. View definition is
--- otherwise unchanged.
-CREATE OR REPLACE VIEW quant_short_v AS
-SELECT
-    -- trade identity and decision-time inputs
-    t.id                       AS trade_id,
-    t.market_id,
-    t.decision_ts,
-    t.side,
-    t.fill_price_assumed,
-    t.size,
-    t.estimator_p_up,
-    t.spot_at_decision,
-    t.vol_at_decision,
-    t.edge_at_decision,
-    ABS(t.edge_at_decision)    AS abs_edge,
-    t.pnl,
-    t.resolved_at              AS trade_resolved_at,
-    -- analytics columns added in 009
-    t.predicted_ev,
-    t.return_5m,
-    t.return_15m,
-    t.return_30m,
-    t.realized_vol_5m,
-    t.resolution_lag_s,
-    t.concurrent_with_prior,
-
-    -- market identity, window, outcome
-    m.polymarket_id,
-    m.slug,
-    m.token_id_yes,
-    m.token_id_no,
-    m.window_duration_s,
-    (m.window_duration_s / 60) AS window_minutes,
-    m.window_start_ts,
-    m.window_end_ts,
-    m.start_spot,
-    m.end_spot,
-    m.outcome,
-    m.asset_id,
-    m.discovered_at,
-    m.resolved_at              AS market_resolved_at,
-    m.price_source_id,
-
-    -- derived flags. NULL when the trade is unresolved (pnl IS NULL).
-    -- NOTE: ties (pnl = 0) count as not-won, matching the CLI's
-    -- pre-existing wins=`pnl > 0` / losses=`pnl <= 0` semantics.
-    CASE
-        WHEN t.pnl IS NULL THEN NULL
-        WHEN t.pnl > 0     THEN TRUE
-        ELSE FALSE
-    END                        AS won,
-    -- Brier score against the YES outcome. NULL until resolved.
-    -- estimator_p_up is the bot's predicted P(YES); outcome=YES is 1, NO is 0.
-    -- Lower is better. 0.25 = random, 0.0 = perfect.
-    CASE
-        WHEN m.outcome IS NULL THEN NULL
-        WHEN m.outcome = 'YES' THEN POWER(t.estimator_p_up - 1, 2)
-        WHEN m.outcome = 'NO'  THEN POWER(t.estimator_p_up,     2)
-        ELSE NULL
-    END                        AS brier
-FROM quant_short_trades t
-JOIN quant_short_markets m ON m.id = t.market_id;
+-- View rebuild is performed in migration 010. CREATE OR REPLACE VIEW
+-- requires that new columns be appended at the end of the projection;
+-- the original draft of this migration interleaved analytics columns
+-- with the existing market-side projection, which Postgres rejects as
+-- a column rename ("cannot change name of view column ..."). The 010
+-- file expresses the corrected ordering. Keeping it in a separate
+-- migration leaves both 009's history and 010's fix re-runnable.
