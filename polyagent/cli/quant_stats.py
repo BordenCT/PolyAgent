@@ -237,6 +237,7 @@ STATS_QUERY_REJECTIONS = """
            AVG(vol)                 AS avg_vol
     FROM quant_decider_rejections
     WHERE decision_ts > NOW() - (%(hours)s * INTERVAL '1 hour')
+      AND (%(include_already_traded)s OR reason != 'already_traded')
     GROUP BY reason
     ORDER BY n DESC
 """
@@ -294,6 +295,12 @@ def _render_rejections(console: Console, rows, hours: float) -> None:
                    "gate-by-gate breakdown of recent rejections.")
 @click.option("--hours", type=float, default=24.0,
               help="Lookback window for --rejections (default 24h).")
+@click.option("--show-already-traded", is_flag=True,
+              help="Include the high-volume 'already_traded' silent-skip "
+                   "rows in --rejections output. Off by default since this "
+                   "fires every cycle for every open trade and dominates "
+                   "the table; useful when you want to see the full funnel "
+                   "(scanner -> decider -> trade) in one view.")
 def quant_stats(
     asset: str | None,
     by_duration: bool,
@@ -303,6 +310,7 @@ def quant_stats(
     by_vol: bool,
     rejections: bool,
     hours: float,
+    show_already_traded: bool,
 ) -> None:
     """Paper-trading performance of the quant short-horizon subsystem."""
     console = Console()
@@ -312,7 +320,10 @@ def quant_stats(
     try:
         if rejections:
             with db.cursor() as cur:
-                cur.execute(STATS_QUERY_REJECTIONS, {"hours": float(hours)})
+                cur.execute(STATS_QUERY_REJECTIONS, {
+                    "hours": float(hours),
+                    "include_already_traded": bool(show_already_traded),
+                })
                 rows = cur.fetchall()
             _render_rejections(console, rows, hours)
             return

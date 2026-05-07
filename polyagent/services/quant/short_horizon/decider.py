@@ -185,9 +185,22 @@ class QuantDecider:
 
         market_id = market_row["id"]
         if self._repo.get_trades_for_market(market_id):
-            # Intentionally silent. Once a market has any trade row, we
-            # never re-enter; logging this on every cycle would drown
-            # the more interesting skip reasons.
+            # Persist this skip to the rejections table so the full
+            # scanner-to-decider funnel is visible in SQL, but suppress
+            # the log line: at trade cadence this fires on every cycle
+            # and would drown the more interesting reasons in the log.
+            # Filter SQL queries with ``WHERE reason != 'already_traded'``
+            # when you want the post-acceptance gate breakdown.
+            if hasattr(self._repo, "insert_rejection"):
+                try:
+                    self._repo.insert_rejection(
+                        reason="already_traded",
+                        slug=slug,
+                        polymarket_id=market_row.get("polymarket_id"),
+                        asset_id=market_row.get("asset_id"),
+                    )
+                except Exception:
+                    logger.exception("failed to persist rejection for %s", slug)
             return
 
         asset_id = market_row.get("asset_id") or "BTC"
