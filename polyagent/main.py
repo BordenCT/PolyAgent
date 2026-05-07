@@ -453,6 +453,7 @@ def run() -> None:
             kelly_max_fraction=settings.kelly_max_fraction,
             min_free_bankroll=Decimal(str(settings.min_free_bankroll)),
             min_contracts=settings.min_contracts,
+            use_constant_predictor=settings.use_constant_predictor,
         )
         quant_resolver = QuantResolver(
             repo=quant_short_repo,
@@ -541,7 +542,7 @@ def run() -> None:
         "exit_target_pct", "exit_volume_multiplier", "exit_stale_hours",
         "exit_stale_threshold", "exit_poll_delay",
         "quant_position_size_usd", "quant_max_trades_per_cycle",
-        "quant_max_open_per_asset",
+        "quant_max_open_per_asset", "use_constant_predictor",
         "paper_trade", "polymarket_live_enabled",
     )
 
@@ -616,6 +617,7 @@ def run() -> None:
                 kelly_max_fraction=new_settings.kelly_max_fraction,
                 min_free_bankroll=Decimal(str(new_settings.min_free_bankroll)),
                 min_contracts=new_settings.min_contracts,
+                use_constant_predictor=new_settings.use_constant_predictor,
             )
         settings = new_settings
         logger.info("reload: applied %d field change(s)", len(changes))
