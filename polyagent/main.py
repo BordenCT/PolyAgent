@@ -39,8 +39,10 @@ from polyagent.services.quant.short_horizon.repository import QuantShortReposito
 from polyagent.services.quant.short_horizon.resolver import QuantResolver
 from polyagent.services.quant.short_horizon.scanner import QuantShortScanner
 from polyagent.services.quant.strike import QuantStrikeService
+from polyagent.services.market_data_ingestion import MarketDataIngestionService
 from polyagent.services.quant.strike.parser import cluster_key as strike_cluster_key
 from polyagent.services.scanner import ScannerService
+from polyagent.data.repositories.market_data import MarketDataRepository
 from polyagent.strategies.arbitrage import ArbitrageStrategy
 from polyagent.strategies.convergence import ConvergenceStrategy
 from polyagent.strategies.whale_copy import WhaleCopyStrategy
@@ -100,6 +102,30 @@ def run() -> None:
     historical_repo = HistoricalRepository(db)
     trade_log_repo = TradeLogRepository(db)
     quant_short_repo = QuantShortRepository(db)
+    market_data_repo = MarketDataRepository(db)
+
+    # Crypto-venue tick-log ingestion (Coinbase spot + Bybit perp). Spawned
+    # in its own asyncio thread so the synchronous worker pool runs unchanged.
+    # Off by default; flip MARKET_DATA_INGESTION_ENABLED=true to start
+    # collecting orderbook snapshots, trade prints, perp mark/index, and
+    # funding history into the tables created by migration 011.
+    market_data_service: MarketDataIngestionService | None = None
+    if settings.market_data_ingestion_enabled:
+        market_data_service = MarketDataIngestionService(
+            repo=market_data_repo,
+            coinbase_product=settings.market_data_coinbase_product,
+            bybit_symbol=settings.market_data_bybit_symbol,
+            snapshot_interval_s=settings.market_data_snapshot_interval_s,
+            depth_levels=settings.market_data_depth_levels,
+        )
+        market_data_service.start_in_thread()
+        logger.info(
+            "market data ingestion started: coinbase=%s bybit=%s interval=%.1fs depth=%d",
+            settings.market_data_coinbase_product,
+            settings.market_data_bybit_symbol,
+            settings.market_data_snapshot_interval_s,
+            settings.market_data_depth_levels,
+        )
 
     scanner = ScannerService(
         min_gap=settings.min_gap,
@@ -524,6 +550,8 @@ def run() -> None:
     def shutdown_handler(signum, frame):
         logger.info("Shutdown signal received")
         queues.shutdown.put(True)
+        if market_data_service is not None:
+            market_data_service.stop()
 
     # Reload-safe knobs. Anything in this set can be hot-swapped via SIGHUP
     # by editing .env and running `kill -HUP <pid>`. Restart-only fields

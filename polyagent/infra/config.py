@@ -95,6 +95,11 @@ class Settings:
     quant_position_size_usd: float
     quant_max_trades_per_cycle: int
     quant_max_open_per_asset: int
+    market_data_ingestion_enabled: bool
+    market_data_coinbase_product: str
+    market_data_bybit_symbol: str
+    market_data_snapshot_interval_s: float
+    market_data_depth_levels: int
 
     # Live order placement — belt-and-suspenders safety gate on top of paper_trade
     polymarket_live_enabled: bool
@@ -161,5 +166,10 @@ class Settings:
             quant_position_size_usd=_env_float("QUANT_POSITION_SIZE_USD", 5.0),
             quant_max_trades_per_cycle=_env_int("QUANT_MAX_TRADES_PER_CYCLE", 5),
             quant_max_open_per_asset=_env_int("QUANT_MAX_OPEN_PER_ASSET", 3),
+            market_data_ingestion_enabled=_env_bool("MARKET_DATA_INGESTION_ENABLED", False),
+            market_data_coinbase_product=_env_str("MARKET_DATA_COINBASE_PRODUCT", "BTC-USD"),
+            market_data_bybit_symbol=_env_str("MARKET_DATA_BYBIT_SYMBOL", "BTCUSDT"),
+            market_data_snapshot_interval_s=_env_float("MARKET_DATA_SNAPSHOT_INTERVAL_S", 1.0),
+            market_data_depth_levels=_env_int("MARKET_DATA_DEPTH_LEVELS", 10),
             polymarket_live_enabled=_env_bool("POLYMARKET_LIVE_ENABLED", False),
         )
