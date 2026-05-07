@@ -105,6 +105,14 @@ class BybitWSClient:
         self._bids = _BookSide()
         self._asks = _BookSide()
         self._stop = asyncio.Event()
+        # Bybit ticker emits *deltas* — each message carries only the
+        # fields that changed since the last update. We merge incoming
+        # deltas into this running state so every emit downstream has
+        # the full mark/index/last picture (and a non-NULL basis whenever
+        # both mark and index have ever been seen).
+        self._last_mark: Decimal | None = None
+        self._last_index: Decimal | None = None
+        self._last_lastp: Decimal | None = None
 
     @property
     def venue(self) -> str:
@@ -212,23 +220,42 @@ class BybitWSClient:
         ts_ms = int(msg.get("ts", 0))
         ts = (datetime.fromtimestamp(ts_ms / 1000.0, tz=timezone.utc)
               if ts_ms else datetime.now(timezone.utc))
-        mark = _maybe_decimal(data.get("markPrice"))
-        index = _maybe_decimal(data.get("indexPrice"))
-        last = _maybe_decimal(data.get("lastPrice"))
-        basis = (mark - index) if (mark is not None and index is not None) else None
+        # Merge deltas into running state; only update fields the message
+        # actually carries. This ensures every emit has the full latest
+        # picture and basis is computable as soon as both legs have arrived.
+        new_mark = _maybe_decimal(data.get("markPrice"))
+        new_index = _maybe_decimal(data.get("indexPrice"))
+        new_last = _maybe_decimal(data.get("lastPrice"))
+        if new_mark is not None:
+            self._last_mark = new_mark
+        if new_index is not None:
+            self._last_index = new_index
+        if new_last is not None:
+            self._last_lastp = new_last
+        basis = (
+            self._last_mark - self._last_index
+            if self._last_mark is not None and self._last_index is not None
+            else None
+        )
         await self._on_mark(MarkIndexUpdate(
             ts=ts,
             venue=self.venue,
             product=data.get("symbol") or self._symbol,
-            mark_price=mark,
-            index_price=index,
-            last_price=last,
+            mark_price=self._last_mark,
+            index_price=self._last_index,
+            last_price=self._last_lastp,
             basis=basis,
         ))
 
     def _reset_book(self) -> None:
         self._bids = _BookSide()
         self._asks = _BookSide()
+        # Drop merged ticker state too. On reconnect Bybit sends a
+        # snapshot ticker first, so the running state will be repopulated
+        # before the next emit; clearing prevents stale-by-disconnect basis.
+        self._last_mark = None
+        self._last_index = None
+        self._last_lastp = None
 
 
 def _maybe_decimal(raw) -> Decimal | None:

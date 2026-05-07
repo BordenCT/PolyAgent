@@ -175,6 +175,43 @@ async def test_bybit_tickers_emits_mark_index_with_basis():
 
 
 @pytest.mark.asyncio
+async def test_bybit_tickers_merges_partial_deltas_into_full_state():
+    """Bybit emits ticker DELTAS (only the changed field). The client must
+    merge them into a running state so each downstream emit carries the
+    last-known mark, index, last_price, and a basis whenever both legs
+    have ever been seen."""
+    captured: list[MarkIndexUpdate] = []
+
+    async def on_mark(m: MarkIndexUpdate) -> None:
+        captured.append(m)
+
+    client = BybitWSClient(symbol="BTCUSDT", on_mark=on_mark)
+    # First delta: only mark; basis still None.
+    await client.process_message({
+        "topic": "tickers.BTCUSDT", "ts": 1,
+        "data": {"symbol": "BTCUSDT", "markPrice": "65000.5"},
+    })
+    # Second delta: only index; running state now has both legs and
+    # basis becomes computable.
+    await client.process_message({
+        "topic": "tickers.BTCUSDT", "ts": 2,
+        "data": {"symbol": "BTCUSDT", "indexPrice": "65000.0"},
+    })
+    # Third delta: only lastPrice; mark + index carry over from prior state.
+    await client.process_message({
+        "topic": "tickers.BTCUSDT", "ts": 3,
+        "data": {"symbol": "BTCUSDT", "lastPrice": "65001.0"},
+    })
+    assert len(captured) == 3
+    assert captured[0].basis is None
+    assert captured[1].basis == Decimal("0.5")
+    assert captured[2].mark_price == Decimal("65000.5")
+    assert captured[2].index_price == Decimal("65000.0")
+    assert captured[2].last_price == Decimal("65001.0")
+    assert captured[2].basis == Decimal("0.5")
+
+
+@pytest.mark.asyncio
 async def test_bybit_tickers_basis_handles_partial_data():
     """Bybit sends partial ticker updates with only the fields that changed.
     Without index price the basis is None rather than 0 or a crash."""
