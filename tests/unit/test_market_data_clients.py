@@ -11,7 +11,7 @@ from decimal import Decimal
 
 import pytest
 
-from polyagent.data.clients.bybit import BybitWSClient, MarkIndexUpdate
+from polyagent.data.clients.bybit import BybitWSClient, FundingPoint, MarkIndexUpdate
 from polyagent.data.clients.coinbase_ws import (
     CoinbaseWSClient,
     OrderbookSnapshot,
@@ -209,6 +209,31 @@ async def test_bybit_tickers_merges_partial_deltas_into_full_state():
     assert captured[2].index_price == Decimal("65000.0")
     assert captured[2].last_price == Decimal("65001.0")
     assert captured[2].basis == Decimal("0.5")
+
+
+@pytest.mark.asyncio
+async def test_bybit_tickers_emit_funding_only_when_rate_changes():
+    """Bybit's REST funding endpoint geo-blocks US IPs (403), so we read
+    fundingRate off the WS tickers stream instead. Two requirements:
+    (a) the first tick with a fundingRate emits a FundingPoint, and
+    (b) subsequent ticks with the same rate do not re-emit."""
+    captured: list[FundingPoint] = []
+
+    async def on_funding(p: FundingPoint) -> None:
+        captured.append(p)
+
+    client = BybitWSClient(symbol="BTCUSDT", on_funding=on_funding)
+    base = {"topic": "tickers.BTCUSDT", "ts": 1, "data": {"symbol": "BTCUSDT"}}
+    # First emit: a rate appears -> persist.
+    await client.process_message({**base, "data": {**base["data"], "fundingRate": "0.0001"}})
+    # Same rate restated by a later delta -> should NOT re-emit.
+    await client.process_message({**base, "data": {**base["data"], "fundingRate": "0.0001"}})
+    # Rate changes (next funding cycle) -> emit again.
+    await client.process_message({**base, "data": {**base["data"], "fundingRate": "0.00012"}})
+    assert len(captured) == 2
+    assert captured[0].funding_rate == Decimal("0.0001")
+    assert captured[0].annualised_rate == Decimal("0.0001") * Decimal("1095")
+    assert captured[1].funding_rate == Decimal("0.00012")
 
 
 @pytest.mark.asyncio

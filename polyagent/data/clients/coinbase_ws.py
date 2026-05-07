@@ -31,6 +31,12 @@ import websockets
 logger = logging.getLogger("polyagent.data.clients.coinbase_ws")
 
 _WS_URL = "wss://advanced-trade-ws.coinbase.com"
+# Coinbase L2 snapshots for BTC-USD ship around 1.0-1.05 MB on initial
+# subscription. The websockets default frame cap is 1 MB which trips a
+# 1009 (message too big) before the snapshot finishes. 10 MB gives
+# generous headroom without exposing us to memory exhaustion from a
+# rogue server.
+_WS_MAX_FRAME_BYTES = 10 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -182,7 +188,9 @@ class CoinbaseWSClient:
         backoff = 1.0
         while not self._stop.is_set():
             try:
-                async with self._ws_factory(_WS_URL) as ws:
+                async with self._ws_factory(
+                    _WS_URL, max_size=_WS_MAX_FRAME_BYTES,
+                ) as ws:
                     await self._subscribe(ws)
                     backoff = 1.0
                     async for raw in ws:

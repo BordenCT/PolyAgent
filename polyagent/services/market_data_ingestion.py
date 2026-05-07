@@ -13,14 +13,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timedelta, timezone
 from threading import Thread
 
 from polyagent.data.clients.bybit import (
     BybitWSClient,
     FundingPoint,
     MarkIndexUpdate,
-    fetch_funding_history,
 )
 from polyagent.data.clients.coinbase_ws import (
     CoinbaseWSClient,
@@ -54,12 +52,10 @@ class MarketDataIngestionService:
         bybit_symbol: str = "BTCUSDT",
         snapshot_interval_s: float = 1.0,
         depth_levels: int = 10,
-        funding_poll_s: float = 4 * 3600.0,
     ) -> None:
         self._repo = repo
         self._snapshot_interval = snapshot_interval_s
         self._depth_levels = depth_levels
-        self._funding_poll = funding_poll_s
         self._coinbase = CoinbaseWSClient(
             product_id=coinbase_product,
             on_trade=self._on_trade,
@@ -70,6 +66,11 @@ class MarketDataIngestionService:
             on_trade=self._on_trade,
             on_snapshot=None,
             on_mark=self._on_mark,
+            # Funding now arrives via the WS tickers stream rather than
+            # REST. Bybit geo-blocks /v5/market/funding/history from US
+            # IPs (403); the WS endpoint is open and includes fundingRate
+            # in every ticker message. We persist on each rate change.
+            on_funding=self._on_funding,
         )
         self._stop = asyncio.Event()
         self._loop_thread: Thread | None = None
@@ -111,7 +112,6 @@ class MarketDataIngestionService:
                 self._coinbase.run(),
                 self._bybit.run(),
                 self._snapshot_loop(),
-                self._funding_loop(),
             )
         except asyncio.CancelledError:
             pass
@@ -132,6 +132,13 @@ class MarketDataIngestionService:
             await asyncio.to_thread(self._repo.insert_mark_index, m)
         except Exception:
             logger.exception("failed to persist mark/index for %s/%s", m.venue, m.product)
+
+    async def _on_funding(self, p: FundingPoint) -> None:
+        """Persist a funding-rate observation when the WS reports a change."""
+        try:
+            await asyncio.to_thread(self._repo.upsert_funding, [p])
+        except Exception:
+            logger.exception("failed to persist funding for %s/%s", p.venue, p.product)
 
     # ---- timer loops ----
 
@@ -161,25 +168,3 @@ class MarketDataIngestionService:
             except asyncio.TimeoutError:
                 continue
 
-    async def _funding_loop(self) -> None:
-        """Periodically refresh Bybit funding history. Idempotent upserts."""
-        # First poll runs immediately so historical context is loaded on
-        # service start; subsequent polls obey ``funding_poll_s``.
-        next_at = datetime.now(timezone.utc)
-        while not self._stop.is_set():
-            now = datetime.now(timezone.utc)
-            if now < next_at:
-                wait_s = (next_at - now).total_seconds()
-                try:
-                    await asyncio.wait_for(self._stop.wait(), timeout=wait_s)
-                    break
-                except asyncio.TimeoutError:
-                    pass
-            try:
-                points = await fetch_funding_history(symbol=self._bybit.product, limit=200)
-                if points:
-                    n = await asyncio.to_thread(self._repo.upsert_funding, points)
-                    logger.info("funding refresh: %d rows upserted", n)
-            except Exception:
-                logger.exception("funding poll failed")
-            next_at = datetime.now(timezone.utc) + timedelta(seconds=self._funding_poll)
