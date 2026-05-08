@@ -136,15 +136,18 @@ class CoinbaseExchangeWSClient:
                 backoff = min(backoff * 2, self._max_backoff)
 
     async def _subscribe(self, ws) -> None:
-        # ``level2_batch`` is the rate-limited L2 channel (batches updates
-        # every ~50ms-1s). For our 1s snapshot cadence it carries the same
-        # information as the un-batched ``level2`` while sending less data.
-        # ``heartbeat`` keeps the connection from idle-closing.
-        await ws.send(json.dumps({
-            "type": "subscribe",
-            "product_ids": [self._product],
-            "channels": ["level2_batch", "matches", "heartbeat"],
-        }))
+        # Subscribe to each channel in its own request. Combining
+        # ``level2_batch`` with other simple-string channels in one
+        # subscribe message is unreliable on Coinbase Exchange: the
+        # server accepts the request but silently drops the trailing
+        # channels, leaving only level2_batch active. Splitting the
+        # subscribe into per-channel sends works around it.
+        for channel in ("level2_batch", "matches", "heartbeat"):
+            await ws.send(json.dumps({
+                "type": "subscribe",
+                "product_ids": [self._product],
+                "channels": [channel],
+            }))
 
     async def process_message(self, msg: dict) -> None:
         """Dispatch a single decoded WS message. Public for testability."""
@@ -155,9 +158,14 @@ class CoinbaseExchangeWSClient:
             await self._handle_l2update(msg)
         elif msg_type == "match" or msg_type == "last_match":
             await self._handle_match(msg)
+        elif msg_type == "subscriptions":
+            # Log so silently-dropped subscriptions surface in the operator
+            # log instead of producing zero-data confusion downstream.
+            channels = [c.get("name") for c in (msg.get("channels") or [])]
+            logger.info("coinbase exchange subscribed: %s", channels)
         elif msg_type == "error":
             logger.warning("coinbase exchange WS error from server: %s", msg)
-        # Ignore "subscriptions", "heartbeat", and any other types.
+        # Ignore "heartbeat" and any other types.
 
     async def _handle_snapshot(self, msg: dict) -> None:
         self._reset_book()
