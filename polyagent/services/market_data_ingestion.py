@@ -20,11 +20,8 @@ from polyagent.data.clients.bybit import (
     FundingPoint,
     MarkIndexUpdate,
 )
-from polyagent.data.clients.coinbase_ws import (
-    CoinbaseWSClient,
-    OrderbookSnapshot,
-    TradePrint,
-)
+from polyagent.data.clients.coinbase_exchange_ws import CoinbaseExchangeWSClient
+from polyagent.data.clients.coinbase_ws import OrderbookSnapshot, TradePrint
 from polyagent.data.repositories.market_data import MarketDataRepository
 
 logger = logging.getLogger("polyagent.services.market_data_ingestion")
@@ -56,7 +53,12 @@ class MarketDataIngestionService:
         self._repo = repo
         self._snapshot_interval = snapshot_interval_s
         self._depth_levels = depth_levels
-        self._coinbase = CoinbaseWSClient(
+        # Coinbase Exchange (Pro) feed: no JWT required for level2_batch +
+        # matches. The newer Advanced Trade feed (CoinbaseWSClient) requires
+        # signed subscriptions for those channels and silently drops the
+        # ones we care about when called unauthenticated, which is why we
+        # default to the Pro endpoint for pure data collection.
+        self._coinbase = CoinbaseExchangeWSClient(
             product_id=coinbase_product,
             on_trade=self._on_trade,
             on_snapshot=None,  # Snapshots are persisted on the timer, not on book reset.

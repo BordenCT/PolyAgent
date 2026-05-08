@@ -12,6 +12,7 @@ from decimal import Decimal
 import pytest
 
 from polyagent.data.clients.bybit import BybitWSClient, FundingPoint, MarkIndexUpdate
+from polyagent.data.clients.coinbase_exchange_ws import CoinbaseExchangeWSClient
 from polyagent.data.clients.coinbase_ws import (
     CoinbaseWSClient,
     OrderbookSnapshot,
@@ -253,3 +254,88 @@ async def test_bybit_tickers_basis_handles_partial_data():
     })
     assert captured[0].basis is None
     assert captured[0].mark_price == Decimal("65000.5")
+
+
+# ---- Coinbase Exchange (Pro) WS client ----
+
+@pytest.mark.asyncio
+async def test_coinbase_exchange_snapshot_then_l2update():
+    client = CoinbaseExchangeWSClient(product_id="BTC-USD")
+    await client.process_message({
+        "type": "snapshot",
+        "product_id": "BTC-USD",
+        "bids": [["100.0", "1.0"], ["99.0", "2.0"]],
+        "asks": [["101.0", "0.5"], ["102.0", "1.0"]],
+    })
+    await client.process_message({
+        "type": "l2update",
+        "product_id": "BTC-USD",
+        "changes": [
+            ["buy",  "100.0", "0"],     # remove top bid
+            ["sell", "100.5", "0.3"],   # insert ask inside spread
+        ],
+    })
+    s = client.snapshot_topN(5)
+    assert s.best_bid == Decimal("99.0")
+    assert s.best_ask == Decimal("100.5")
+
+
+@pytest.mark.asyncio
+async def test_coinbase_exchange_match_inverts_maker_to_aggressor():
+    """Coinbase Exchange ``matches`` reports the maker side. Convention
+    everywhere else in the system is the aggressor side, so the client
+    must invert: maker buy -> aggressor sell, maker sell -> aggressor buy."""
+    captured: list[TradePrint] = []
+
+    async def on_trade(tr: TradePrint) -> None:
+        captured.append(tr)
+
+    client = CoinbaseExchangeWSClient(product_id="BTC-USD", on_trade=on_trade)
+    await client.process_message({
+        "type": "match", "trade_id": 12345,
+        "product_id": "BTC-USD", "side": "sell",
+        "price": "100.5", "size": "0.25",
+        "time": "2026-05-08T01:00:00.000000Z",
+    })
+    await client.process_message({
+        "type": "match", "trade_id": 12346,
+        "product_id": "BTC-USD", "side": "buy",
+        "price": "100.4", "size": "0.10",
+        "time": "2026-05-08T01:00:01.000000Z",
+    })
+    assert len(captured) == 2
+    # maker sell -> aggressor buy
+    assert captured[0].side == "buy"
+    assert captured[0].price == Decimal("100.5")
+    # maker buy -> aggressor sell
+    assert captured[1].side == "sell"
+
+
+@pytest.mark.asyncio
+async def test_coinbase_exchange_ignores_unknown_message_types():
+    """Subscriptions, heartbeats, and any other server messages must not
+    crash or affect the local book / callback counts."""
+    captured: list[TradePrint] = []
+
+    async def on_trade(tr: TradePrint) -> None:
+        captured.append(tr)
+
+    client = CoinbaseExchangeWSClient(product_id="BTC-USD", on_trade=on_trade)
+    for msg in [
+        {"type": "subscriptions", "channels": []},
+        {"type": "heartbeat", "sequence": 1},
+        {"type": "error", "message": "test"},
+        {"type": "ticker"},  # not subscribed; should be ignored
+    ]:
+        await client.process_message(msg)
+    assert captured == []
+    snap = client.snapshot_topN(5)
+    assert snap.bids == [] and snap.asks == []
+
+
+@pytest.mark.asyncio
+async def test_coinbase_exchange_venue_label_matches_advanced_trade():
+    """Both Coinbase clients report venue='coinbase' so existing analytics
+    queries don't need to know which feed produced the row."""
+    client = CoinbaseExchangeWSClient(product_id="BTC-USD")
+    assert client.venue == "coinbase"
