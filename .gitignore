@@ -30,3 +30,4 @@ venv/
 # OS
 .DS_Store
 Thumbs.db
+quant_short_trades.csv
