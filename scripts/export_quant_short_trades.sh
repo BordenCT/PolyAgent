@@ -1,51 +1,48 @@
 #!/usr/bin/env bash
 # Export resolved quant_short trades to CSV for offline inference work.
 #
-# Run on the host that can reach the polyagent-db Postgres instance.
-# Writes to ./quant_short_trades.csv in the current directory.
+# Tries paths in order:
+#   1. psql against $DATABASE_URL  (works if psql is installed and the URL resolves)
+#   2. psql against localhost:5432  (compose exposes the DB port to the host)
+#   3. podman compose exec polyagent-db psql  (works without a host psql)
 #
-# Usage:
-#   DATABASE_URL=postgresql://polyagent:polyagent@polyagent-db:5432/polyagent \
-#     scripts/export_quant_short_trades.sh
-#
-# Or, if the DB only reachable from inside the compose network:
-#   podman compose exec polyagent-db \
-#     psql -U polyagent -d polyagent \
-#     -c "$(cat scripts/export_quant_short_trades.sql)" > quant_short_trades.csv
+# Writes ./quant_short_trades.csv (or $1 if passed).
 
 set -euo pipefail
 
 OUT="${1:-quant_short_trades.csv}"
-: "${DATABASE_URL:?DATABASE_URL must be set (or pipe through podman exec, see header)}"
+SQL_FILE="$(dirname "$0")/export_quant_short_trades.sql"
 
-psql "$DATABASE_URL" --csv -c "
-SELECT
-    trade_id,
-    market_id,
-    asset_id,
-    decision_ts,
-    side,
-    estimator_p_up,
-    edge_at_decision,
-    abs_edge,
-    fill_price_assumed,
-    size,
-    vol_at_decision,
-    window_duration_s,
-    outcome,
-    pnl,
-    won,
-    brier,
-    concurrent_with_prior,
-    trade_resolved_at,
-    market_resolved_at,
-    start_spot,
-    end_spot,
-    slug
-FROM quant_short_v
-WHERE pnl IS NOT NULL
-ORDER BY decision_ts
-" > "$OUT"
+if [ ! -f "$SQL_FILE" ]; then
+    echo "missing $SQL_FILE" >&2; exit 1
+fi
+
+run_with_psql_url() {
+    local url="$1"
+    psql "$url" --csv -f "$SQL_FILE"
+}
+
+run_with_podman() {
+    # -T disables TTY allocation so stdout is clean CSV.
+    podman compose exec -T polyagent-db \
+        psql -U polyagent -d polyagent --csv -f - < "$SQL_FILE"
+}
+
+if command -v psql >/dev/null 2>&1 && [ -n "${DATABASE_URL:-}" ]; then
+    echo "exporting via psql + DATABASE_URL..." >&2
+    run_with_psql_url "$DATABASE_URL" > "$OUT" || {
+        echo "DATABASE_URL path failed, falling back to localhost..." >&2
+        run_with_psql_url "postgresql://polyagent:polyagent@localhost:5432/polyagent" > "$OUT"
+    }
+elif command -v psql >/dev/null 2>&1; then
+    echo "exporting via psql + localhost:5432..." >&2
+    run_with_psql_url "postgresql://polyagent:polyagent@localhost:5432/polyagent" > "$OUT"
+elif command -v podman >/dev/null 2>&1; then
+    echo "exporting via podman compose exec..." >&2
+    run_with_podman > "$OUT"
+else
+    echo "need either psql or podman on PATH" >&2; exit 1
+fi
 
 ROWS=$(($(wc -l < "$OUT") - 1))
-echo "Wrote $ROWS resolved trades to $OUT"
+echo "wrote $ROWS resolved trades to $OUT"
