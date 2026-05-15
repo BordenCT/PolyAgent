@@ -31,3 +31,4 @@ venv/
 .DS_Store
 Thumbs.db
 quant_short_trades.csv
+quant_short_trades_with_micro.csv
