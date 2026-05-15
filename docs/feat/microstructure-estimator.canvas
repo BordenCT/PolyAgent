@@ -1,0 +1,138 @@
+{
+  "nodes": [
+    {
+      "id": "title",
+      "type": "text",
+      "text": "# Microstructure Estimator (xgboost)\n\nPre-registered replacement for the lognormal Phi(d2) in quant_short. Tests whether microstructure features can produce predictions that actually move with outcomes (RES > 0.008 OOS).",
+      "x": -680,
+      "y": -680,
+      "width": 800,
+      "height": 150,
+      "color": "4"
+    },
+    {
+      "id": "problem",
+      "type": "text",
+      "text": "## Problem\n\nCurrent lognormal estimator has OOS Brier 0.30, Resolution 0.002. Predictions do not co-move with outcomes. Constant-0.5 baseline beats it on Brier.\n\nCannot recalibrate; must replace.",
+      "x": -680,
+      "y": -480,
+      "width": 360,
+      "height": 220,
+      "color": "1"
+    },
+    {
+      "id": "hypothesis",
+      "type": "text",
+      "text": "## Hypothesis\n\nxgboost on microstructure features will achieve:\n- OOS Brier <= 0.244\n- OOS Resolution >= 0.008\n\nBoth must hold. Falsified by either failure.",
+      "x": -280,
+      "y": -480,
+      "width": 360,
+      "height": 220,
+      "color": "5"
+    },
+    {
+      "id": "tier1",
+      "type": "text",
+      "text": "## Tier 1: must-have\n\n- aggr_flow at 10s/60s/300s/900s (both venues)\n- OFI 60s (both venues)\n- microprice deviation (both venues)\n- cross-venue mid diff (bps)\n- bybit perp basis\n\n**Mechanism:** informed taker flow + book pressure drive short-horizon price.",
+      "x": -680,
+      "y": -200,
+      "width": 360,
+      "height": 280,
+      "color": "2"
+    },
+    {
+      "id": "tier2",
+      "type": "text",
+      "text": "## Tier 2: extensions\n\n- realized vol at 1m/5m/15m\n- jump indicator (BNS)\n- log returns at 10s/60s/300s\n- VPIN toxicity (50 buckets)\n- spread regime (vs 1h median)\n- strike distance (signed)",
+      "x": -280,
+      "y": -200,
+      "width": 360,
+      "height": 280,
+      "color": "2"
+    },
+    {
+      "id": "tier3",
+      "type": "text",
+      "text": "## Tier 3: controls\n\n- hour-of-day (sin/cos)\n- minutes since funding\n- time into window\n- window_5m flag\n- concurrent_with_prior\n\n**Excluded:** raw funding, Polymarket prob, TA indicators, vol_at_decision.\n\n**Total: 27 features.**",
+      "x": 120,
+      "y": -200,
+      "width": 360,
+      "height": 320,
+      "color": "2"
+    },
+    {
+      "id": "model",
+      "type": "text",
+      "text": "## Model\n\n**xgboost classifier**\n\nGrid (locked): max_depth in {3,5,7} x lr in {0.01,0.05,0.10}\n= **N=9 variants**\n\nn_estimators by early stopping on validation fold.\n\nBaseline: logistic regression (informational only).",
+      "x": -680,
+      "y": 160,
+      "width": 360,
+      "height": 240,
+      "color": "3"
+    },
+    {
+      "id": "validation",
+      "type": "text",
+      "text": "## Walk-forward validation\n\n3 folds, time-ordered, no shuffle.\n\n- Hyperparams chosen on val fold\n- Test fold untouchable until final report\n- 24h embargo between train and test\n\n**DSR with N=9** for the report.",
+      "x": -280,
+      "y": 160,
+      "width": 360,
+      "height": 240,
+      "color": "3"
+    },
+    {
+      "id": "gate",
+      "type": "text",
+      "text": "## Pre-fit data gate\n\nMin **4000 joinable trades**.\nCurrent: 1571. Need ~2 more weeks.\n\n3+ distinct trading days in OOS fold.\n\nNo lookahead: ts <= decision_ts for every feature.",
+      "x": 120,
+      "y": 160,
+      "width": 360,
+      "height": 240,
+      "color": "3"
+    },
+    {
+      "id": "deploy",
+      "type": "text",
+      "text": "### DEPLOY\n\nBoth thresholds met on **all 3 folds** AND DSR >= 0.95\n\n-> quarter-Kelly, 2-week paper shadow first",
+      "x": -680,
+      "y": 480,
+      "width": 360,
+      "height": 200,
+      "color": "5"
+    },
+    {
+      "id": "research",
+      "type": "text",
+      "text": "### MORE-RESEARCH\n\nMet on 2/3 folds, OR DSR in [0.50, 0.95)\n\n-> collect 2 more weeks, re-test same spec",
+      "x": -280,
+      "y": 480,
+      "width": 360,
+      "height": 200,
+      "color": "6"
+    },
+    {
+      "id": "abandon",
+      "type": "text",
+      "text": "### ABANDON\n\nFails majority of folds OR DSR < 0.50\n\n-> mothball quant_short; restrict capital to main flow",
+      "x": 120,
+      "y": 480,
+      "width": 360,
+      "height": 200,
+      "color": "1"
+    }
+  ],
+  "edges": [
+    {"id": "e1", "fromNode": "problem", "toNode": "hypothesis", "label": "motivates"},
+    {"id": "e2", "fromNode": "hypothesis", "toNode": "tier1", "label": "tests via"},
+    {"id": "e3", "fromNode": "hypothesis", "toNode": "tier2"},
+    {"id": "e4", "fromNode": "hypothesis", "toNode": "tier3"},
+    {"id": "e5", "fromNode": "tier1", "toNode": "model"},
+    {"id": "e6", "fromNode": "tier2", "toNode": "model"},
+    {"id": "e7", "fromNode": "tier3", "toNode": "model"},
+    {"id": "e8", "fromNode": "model", "toNode": "validation"},
+    {"id": "e9", "fromNode": "validation", "toNode": "gate", "label": "after"},
+    {"id": "e10", "fromNode": "gate", "toNode": "deploy"},
+    {"id": "e11", "fromNode": "gate", "toNode": "research"},
+    {"id": "e12", "fromNode": "gate", "toNode": "abandon"}
+  ]
+}
