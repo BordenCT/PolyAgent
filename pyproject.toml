@@ -52,4 +52,5 @@ testpaths = ["tests"]
 asyncio_mode = "auto"
 markers = [
     "integration: marks tests that require a running database",
+    "slow: marks tests that take more than ~5s to run",
 ]

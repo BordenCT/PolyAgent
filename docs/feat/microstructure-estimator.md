@@ -67,7 +67,14 @@ Falsified if either threshold fails. Failing this, the `quant_short` subsystem i
 - **Hand-picked TA indicators (RSI, MACD).** No mechanism beyond what multi-horizon returns already capture.
 - **vol_at_decision (current `vol_at_decision`).** Per `[[project-quant-high-edge-paused]]` we don't tune on this. Realized vol features replace it.
 
-### Total feature count: 27
+### Total feature count: 31
+
+*Correction note (2026-05-15, post-lock):* the initial commit said "27" as a soft
+arithmetic estimate. The locked LIST above enumerates to 31 (Tier 1: 14, Tier 2:
+11 including both venues for `spread_regime`, Tier 3: 6). The hypothesis and the
+list itself are unchanged; this is a count fix in the prose, not a feature
+change. The `LOCKED_FEATURES` tuple in `polyagent/services/quant/ml/train.py`
+reflects the corrected count.
 
 ---
 
