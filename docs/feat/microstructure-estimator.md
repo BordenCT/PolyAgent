@@ -155,4 +155,4 @@ If any of these happen, the test is exploratory and DSR must be recomputed with 
 
 ## Pre-commit hash
 
-To be recorded at commit time: `<commit-hash>` (set after first commit of this doc).
+Spec locked at commit `d5466937c6d17c893309d21668306c8f295459c8` (initial commit of this doc, 2026-05-15). Any change after this point requires a new pre-registration doc with a fresh hash and an explicit note of what was changed and why.
