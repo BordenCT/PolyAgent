@@ -1,0 +1,38 @@
+{
+  "decision": "ABANDON",
+  "rationale": "only 0/3 folds passed median Brier+RES thresholds",
+  "n_joinable": 5360,
+  "spec_commit": "d5466937c6d17c893309d21668306c8f295459c8",
+  "folds": [
+    {
+      "fold": 1,
+      "train_n": 3216,
+      "test_n": 964,
+      "train_end": "2026-05-19T21:29:41.321456+00:00",
+      "test_start": "2026-05-23T00:30:06.899280+00:00",
+      "median_brier": 0.2509838938713074,
+      "median_res": 0.0006766709984428404,
+      "best_brier": 0.24939057230949402
+    },
+    {
+      "fold": 2,
+      "train_n": 4020,
+      "test_n": 804,
+      "train_end": "2026-05-23T00:22:02.855123+00:00",
+      "test_start": "2026-05-25T05:30:09.633027+00:00",
+      "median_brier": 0.2517112195491791,
+      "median_res": 0.00046499104994252553,
+      "best_brier": 0.25017309188842773
+    },
+    {
+      "fold": 3,
+      "train_n": 4288,
+      "test_n": 536,
+      "train_end": "2026-05-24T04:50:55.995389+00:00",
+      "test_start": "2026-05-26T04:45:45.408946+00:00",
+      "median_brier": 0.2557964324951172,
+      "median_res": 0.0017523558080645642,
+      "best_brier": 0.25159528851509094
+    }
+  ]
+}
