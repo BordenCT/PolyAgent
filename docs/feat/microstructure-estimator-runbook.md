@@ -1,10 +1,41 @@
 # Microstructure Estimator — Runbook
 
-**Spec:** `docs/feat/microstructure-estimator.md` (locked at commit `d5466937`)
+**Spec:** `docs/feat/microstructure-estimator.md` (locked `d5466937`) + `microstructure-estimator-amendment-1.md` (2026-05-27)
 **Author:** Charles Borden
-**Last updated:** 2026-05-15
+**Last updated:** 2026-05-27
 
 This is the "you walked back to your laptop after a trip, where do you look" guide for the auto-running microstructure pipeline.
+
+---
+
+## SHADOW RECOVERY PATH (preferred — no waiting, no bankroll dependency)
+
+The trades-based gate (4000 resolved trades) stalled when the paper bankroll
+ran dry. Amendment #1 switches the population to **all evaluated decision
+points**, recovered from `quant_decider_rejections` (~5266 usable candidates).
+This is the path to run now:
+
+```bash
+cd ~/Development/PolyAgent && git pull
+uv sync --extra ml                                  # if not already done
+polyagent migrate up                                # applies 012_quant_shadow_labels
+# Recover labels (fetches ~5266 outcomes from Polymarket, ~10-20 min) + train:
+.venv/bin/python -m polyagent.services.quant.ml.pipeline \
+    --source shadow --recover-first \
+    --features-out quant_short_features_shadow.csv \
+    --report-out docs/feat/microstructure-estimator-report.md \
+    --report-json docs/feat/microstructure-estimator-report.json -v
+```
+
+Then `cat docs/feat/microstructure-estimator-report.md` for the decision.
+
+To recover labels without training (e.g. to inspect first):
+```bash
+.venv/bin/python -c "import os; from polyagent.services.quant.ml.recover import recover_shadow_labels; print(recover_shadow_labels(os.environ['DATABASE_URL']))"
+```
+
+The recovery is idempotent (upsert on `polymarket_id`); re-running fills any
+outcomes that resolved since the last pass.
 
 ---
 

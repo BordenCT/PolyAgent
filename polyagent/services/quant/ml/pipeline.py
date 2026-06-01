@@ -79,6 +79,7 @@ def run(
     report_out: Path,
     report_json: Path | None = None,
     skip_extract: bool = False,
+    source: str = "trades",
 ) -> int:
     """Returns exit code; 0 = success, non-zero = failure."""
     features_out = Path(features_out)
@@ -89,7 +90,7 @@ def run(
         logger.info("--skip-extract set; loading %s", features_out)
         df = pd.read_csv(features_out, parse_dates=["decision_ts", "window_start_ts", "window_end_ts"])
     else:
-        df = extract_features(conninfo, features_out)
+        df = extract_features(conninfo, features_out, source=source)
 
     if df.empty:
         logger.error("feature extraction produced no rows")
@@ -175,6 +176,19 @@ def main() -> int:
         action="store_true",
         help="Print joinable trade count and exit 0 if gate met, 3 if not.",
     )
+    parser.add_argument(
+        "--source",
+        choices=["trades", "shadow"],
+        default="trades",
+        help="Feature source: 'trades' (locked Stage 1+2) or 'shadow' "
+             "(recovered evaluated-market labels; VPIN/jump in-SQL).",
+    )
+    parser.add_argument(
+        "--recover-first",
+        action="store_true",
+        help="Run shadow-label recovery (backfill quant_shadow_labels from "
+             "Polymarket) before extracting. Only meaningful with --source shadow.",
+    )
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args()
 
@@ -188,8 +202,18 @@ def main() -> int:
         print(f"joinable_trades={n} required={MIN_JOINABLE_TRADES}")
         return 0 if n >= MIN_JOINABLE_TRADES else 3
 
-    # Early gate check before any expensive extraction.
-    if not args.skip_extract and args.conninfo:
+    # Optional: backfill shadow labels from Polymarket before extracting.
+    if args.recover_first:
+        if args.source != "shadow":
+            logger.warning("--recover-first is only meaningful with --source shadow")
+        from polyagent.services.quant.ml.recover import recover_shadow_labels
+        logger.info("running shadow-label recovery")
+        stats = recover_shadow_labels(args.conninfo or "")
+        logger.info("recovery stats: %s", stats)
+
+    # Early gate check (trades source only; shadow relies on the
+    # in-training MIN_JOINABLE_TRADES check against the recovered set).
+    if args.source == "trades" and not args.skip_extract and args.conninfo:
         try:
             n = count_joinable_trades(args.conninfo)
             if n < MIN_JOINABLE_TRADES:
@@ -207,6 +231,7 @@ def main() -> int:
         report_out=args.report_out,
         report_json=args.report_json,
         skip_extract=args.skip_extract,
+        source=args.source,
     )
 
 

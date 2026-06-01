@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 from dataclasses import dataclass, field
 from typing import Sequence
 
@@ -212,6 +213,11 @@ def train_one(
         "colsample_bytree": 0.85,
         "tree_method": "hist",
         "verbosity": 0,
+        # Cap threads. Our datasets are small (a few thousand rows); on a
+        # high-core host (the target MS-A2 is 96-thread) xgboost's default
+        # of one-thread-per-core is pure overhead and can run 100x slower
+        # than a capped pool. 4 is plenty for this row count.
+        "nthread": min(4, (os.cpu_count() or 4)),
     }
     booster = xgb.train(
         params,

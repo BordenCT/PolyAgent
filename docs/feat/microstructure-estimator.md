@@ -5,6 +5,8 @@
 **Author:** Charles Borden
 **Subsystem:** `quant_short` (BTC short-window up/down)
 
+> **Amended 2026-05-27** by [`microstructure-estimator-amendment-1.md`](microstructure-estimator-amendment-1.md): population changed from "resolved trades" to "all evaluated decision points" (recovered shadow labels). Feature list, xgboost grid, validation, and thresholds are UNCHANGED. Read the amendment alongside this spec.
+
 ---
 
 ## Hypothesis
