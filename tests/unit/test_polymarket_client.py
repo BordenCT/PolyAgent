@@ -266,6 +266,33 @@ class TestFetchMarketState:
         assert state["is_resolved"] is True
         assert state["midpoint_price"] == Decimal("0")
 
+    def test_429_retry_after_zero_is_floored_not_busy_retry(self, monkeypatch):
+        """The CLOB (Cloudflare) often returns `Retry-After: 0`. Sleeping 0s
+        just busy-retries into another 429, so the backoff must floor to 1s
+        before the single retry."""
+        import httpx
+        import polyagent.data.clients.polymarket as pmmod
+
+        slept = []
+        monkeypatch.setattr(pmmod.time, "sleep", lambda s: slept.append(s))
+
+        err_resp = MagicMock(status_code=429)
+        err_resp.headers = {"Retry-After": "0"}
+        bad = MagicMock()
+        bad.raise_for_status.side_effect = httpx.HTTPStatusError(
+            "rate limited", request=MagicMock(), response=err_resp,
+        )
+        good = _clob_response({
+            "closed": True, "best_bid": 0, "best_ask": 0,
+            "tokens": [{"token_id": "t", "outcome": "Yes", "winner": True}],
+        })
+        self.client._http.get = MagicMock(side_effect=[bad, good])
+
+        state = self.client.fetch_market_state("0xabc")
+        assert state is not None          # recovered on the retry
+        assert state["is_resolved"] is True
+        assert slept == [1.0]             # floored 0 -> 1.0, retried exactly once
+
 
 class TestFetchOrderBook:
     def setup_method(self):

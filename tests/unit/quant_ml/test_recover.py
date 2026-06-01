@@ -74,3 +74,88 @@ def test_resolve_one_handles_unparseable_slug():
     assert "asset_id" not in enriched
     assert outcome is None
     assert fetch_ok is True
+
+
+def test_resolve_one_failed_fetch_is_not_silently_unresolved():
+    """A None state (exhausted-429 / network failure) must report
+    fetch_ok=False, so a rate-limit storm is counted as fetch_failed and
+    retried on a re-run rather than poisoning the label set as 'unresolved'."""
+    from polyagent.services.quant.ml import recover
+
+    class _DeadClient:
+        def fetch_market_state(self, cid):
+            return None  # fetch failed
+
+    row = {"polymarket_id": "0xabc", "slug": "btc-updown-5m-1779494400",
+           "decision_ts": None}
+    # attempts=1 keeps the test fast (no backoff sleep).
+    enriched, outcome, fetch_ok = recover._resolve_one(_DeadClient(), row, attempts=1)
+    assert enriched["asset_id"] == "BTC"
+    assert outcome is None
+    assert fetch_ok is False
+
+
+def test_fetch_with_retry_retries_then_succeeds():
+    from polyagent.services.quant.ml import recover
+
+    calls = {"n": 0}
+
+    class _FlakyClient:
+        def fetch_market_state(self, cid):
+            calls["n"] += 1
+            if calls["n"] < 3:
+                return None
+            return {"is_resolved": True, "midpoint_price": Decimal("1")}
+
+    slept = []
+    state = recover._fetch_with_retry(
+        _FlakyClient(), "0xabc", recover._NULL_GATE,
+        attempts=4, sleep=slept.append, jitter=lambda: 0.0,
+    )
+    assert state == {"is_resolved": True, "midpoint_price": Decimal("1")}
+    assert calls["n"] == 3
+    assert slept == [1.0, 2.0]  # backoff between the two failed attempts
+
+
+def test_fetch_with_retry_gives_up_after_attempts():
+    from polyagent.services.quant.ml import recover
+
+    calls = {"n": 0}
+
+    class _DeadClient:
+        def fetch_market_state(self, cid):
+            calls["n"] += 1
+            return None
+
+    slept = []
+    state = recover._fetch_with_retry(
+        _DeadClient(), "0xabc", recover._NULL_GATE,
+        attempts=3, sleep=slept.append, jitter=lambda: 0.0,
+    )
+    assert state is None
+    assert calls["n"] == 3
+    assert slept == [1.0, 2.0]  # no sleep after the final attempt
+
+
+def test_rate_gate_assigns_spaced_slots():
+    """Each wait() schedules the next caller one interval later; the sleep
+    is the gap to that caller's assigned slot."""
+    from polyagent.services.quant.ml.recover import _RateGate
+
+    clock = [100.0]
+    slept = []
+    gate = _RateGate(10.0, monotonic=lambda: clock[0], sleep=slept.append)
+    gate.wait()  # slot=100.0, delay 0 -> no sleep
+    gate.wait()  # slot=100.1, delay 0.1 -> sleep 0.1
+    gate.wait()  # slot=100.2, delay 0.2 -> sleep 0.2
+    assert slept == [pytest.approx(0.1), pytest.approx(0.2)]
+
+
+def test_rate_gate_disabled_when_rate_non_positive():
+    from polyagent.services.quant.ml.recover import _RateGate
+
+    slept = []
+    gate = _RateGate(0, monotonic=lambda: 0.0, sleep=slept.append)
+    gate.wait()
+    gate.wait()
+    assert slept == []

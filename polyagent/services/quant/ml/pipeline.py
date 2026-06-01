@@ -189,6 +189,19 @@ def main() -> int:
         help="Run shadow-label recovery (backfill quant_shadow_labels from "
              "Polymarket) before extracting. Only meaningful with --source shadow.",
     )
+    parser.add_argument(
+        "--recover-rate",
+        type=float,
+        default=4.0,
+        help="Max Polymarket requests/sec during recovery (shared across "
+             "workers). Lower if you see 429s; raise to backfill faster.",
+    )
+    parser.add_argument(
+        "--recover-workers",
+        type=int,
+        default=4,
+        help="Recovery fetch threads (paced by --recover-rate).",
+    )
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args()
 
@@ -208,7 +221,11 @@ def main() -> int:
             logger.warning("--recover-first is only meaningful with --source shadow")
         from polyagent.services.quant.ml.recover import recover_shadow_labels
         logger.info("running shadow-label recovery")
-        stats = recover_shadow_labels(args.conninfo or "")
+        stats = recover_shadow_labels(
+            args.conninfo or "",
+            max_workers=args.recover_workers,
+            rate_per_s=args.recover_rate,
+        )
         logger.info("recovery stats: %s", stats)
 
     # Early gate check (trades source only; shadow relies on the

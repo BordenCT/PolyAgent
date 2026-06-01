@@ -281,7 +281,15 @@ class PolymarketClient:
                 }
             except httpx.HTTPStatusError as e:
                 if e.response.status_code == 429 and attempt == 0:
-                    retry_after = float(e.response.headers.get("Retry-After", "5"))
+                    try:
+                        retry_after = float(e.response.headers.get("Retry-After", "5") or "5")
+                    except (TypeError, ValueError):
+                        retry_after = 5.0
+                    # Cloudflare fronting the CLOB frequently returns
+                    # `Retry-After: 0`; sleeping 0 just busy-retries into
+                    # another 429. Floor to 1s, and cap so a bogus header
+                    # cannot stall the caller indefinitely.
+                    retry_after = min(max(retry_after, 1.0), 30.0)
                     logger.info(
                         "Rate limited on %s — backing off %.1fs",
                         condition_id, retry_after,
