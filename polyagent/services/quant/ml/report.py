@@ -76,7 +76,7 @@ def _feature_importance_section(folds: Iterable[FoldResult]) -> str:
     return "\n".join(out_lines) + "\n" if out_lines else ""
 
 
-def render_report(report: TrainingReport, out_path: Path) -> Path:
+def render_report(report: TrainingReport, out_path: Path, source: str = "trades") -> Path:
     """Write the report to a markdown file. Returns the path."""
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -95,7 +95,13 @@ def render_report(report: TrainingReport, out_path: Path) -> Path:
     parts.append("Claim: xgboost on locked microstructure features beats the lognormal")
     parts.append("       Phi(d2) baseline and exceeds Brier <= "
                  f"{THRESH_BRIER} AND RES >= {THRESH_RES} on all OOS folds.")
-    parts.append(f"Universe: BTC quant_short trades joined to bybit + coinbase market_data.")
+    universe = (
+        "recovered shadow decision points (evaluated-but-not-traded "
+        "*-updown-* markets), PM-settled, joined to bybit + coinbase market_data"
+        if source == "shadow"
+        else "BTC quant_short trades joined to bybit + coinbase market_data"
+    )
+    parts.append(f"Universe: {universe}.")
     parts.append(f"N joinable: {report.n_joinable}")
     if report.folds:
         f = report.folds[0]

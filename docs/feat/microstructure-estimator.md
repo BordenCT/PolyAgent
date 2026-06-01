@@ -1,11 +1,13 @@
 # Microstructure Estimator (xgboost) — Pre-Registration
 
 **Date:** 2026-05-15
-**Status:** PRE-REGISTERED (locked before fitting)
+**Status:** FALSIFIED / ABANDON (2026-06-01) — see Result below
 **Author:** Charles Borden
 **Subsystem:** `quant_short` (BTC short-window up/down)
 
 > **Amended 2026-05-27** by [`microstructure-estimator-amendment-1.md`](microstructure-estimator-amendment-1.md): population changed from "resolved trades" to "all evaluated decision points" (recovered shadow labels). Feature list, xgboost grid, validation, and thresholds are UNCHANGED. Read the amendment alongside this spec.
+
+> **Result — 2026-06-01 — ABANDON.** Ran on the amended population: 5751 recovered shadow labels (PM-settled), 5360 feature-complete, 3-fold walk-forward. **0/3 folds passed.** OOS median Brier 0.251 / 0.252 / 0.256 (all worse than the 0.244 bar AND ~= the 0.25 constant-0.5 base rate); Murphy Resolution 0.0007 / 0.0005 / 0.0018 (bar 0.008). Best config per fold ≈ coin flip; added model capacity made OOS *worse*. Features carried non-zero in-sample gain but **zero OOS signal**, reproducing the prior AUC ~0.50 null on a 3× larger, independently-recovered sample. Both falsification thresholds failed → per the stopping rule below, `quant_short` direction prediction is **mothballed**. Report: `microstructure-estimator-report.{md,json}` @ commit `d47041e`; spec @ `d5466937`. Do not curve-fit this dataset; any new angle requires a fresh pre-registration and untouched holdout.
 
 ---
 

@@ -108,7 +108,7 @@ def run(
     )
 
     # Stage 4: render markdown report.
-    rendered = render_report(report, report_out)
+    rendered = render_report(report, report_out, source=source)
     logger.info("wrote report to %s", rendered)
 
     if report_json is not None:
